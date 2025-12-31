@@ -1,3 +1,11 @@
+# Manga OCR Server (Custom Version)
+
+This is a customized version of [manga-ocr](https://github.com/kha-white/manga-ocr).
+
+### New Features:
+- **FastAPI Server**: Added a backend server to handle Base64 image uploads and return OCR text.
+- **Android Integration**: Compatible with my custom 
+[SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) client.
 # Manga OCR
 
 Optical character recognition for Japanese text, with the main focus being Japanese manga.
