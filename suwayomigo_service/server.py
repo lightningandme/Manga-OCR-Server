@@ -65,8 +65,9 @@ def get_ai_translation(text: str):
     try:
         start_time = time.time()
         # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
+        # noinspection PyTypeChecker
         response = client.chat.completions.create(
-            model="deepseek-chat",  # V3 模型，极速响应
+            model="deepseek-chat",
             messages=[
                 {"role": "system", "content": "你是一个漫画翻译器，直接返回译文。若有生僻动词，在译文后括号内标注[原型]"},
                 {"role": "user", "content": text},
@@ -81,8 +82,13 @@ def get_ai_translation(text: str):
     except Exception as e:
         return f"翻译出错了: {str(e)}"
 
+
+# 缓存最近一次的 OCR 文本，方便第二个请求直接获取
+last_ocr_text = ""
 @app.post("/ocr")
 async def perform_ocr(payload: dict = Body(...)):
+    global last_ocr_text  # 必须声明：我要修改的是外面那个全局变量
+    last_ocr_text = ""  # 每次识别新图前先清空旧缓存
     img_b64 = payload.get("image")
     if not img_b64:
         return {"status": "error", "message": "No image data"}
@@ -92,21 +98,30 @@ async def perform_ocr(payload: dict = Body(...)):
         img_data = base64.b64decode(img_b64)
         image = Image.open(io.BytesIO(img_data))
         text = mocr(image)
+        last_ocr_text = text  # 存入缓存
 
-        # 2. 调用 AI 翻译 (云端，约 1s)
-        translation = get_ai_translation(text)
-
-        # 3. 本地分词 (本地，毫秒级)
         words = analyze_text(text)
 
+        # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
         return {
             "status": "success",
             "text": text,
-            "translation": translation,
-            "words": words
+            "words": words,
+            "translation": ""  # 初始为空
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}`
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/get_translation")
+async def get_translation():
+    global last_ocr_text  # 读取全局变量
+    if not last_ocr_text:
+        return {"translation": "未检测到待翻译文字"}
+
+    # 这里调用你之前的 DeepSeek 翻译函数
+    translation = get_ai_translation(last_ocr_text)
+    return {"translation": translation}
 
 
 if __name__ == "__main__":
