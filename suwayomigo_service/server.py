@@ -12,6 +12,15 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from manga_ocr import MangaOcr
 from janome.tokenizer import Tokenizer
 
+from openai import OpenAI
+import time
+
+# --- 配置 DeepSeek ---
+client = OpenAI(
+    api_key="sk-77aef9337e7648f58754965460002864",
+    base_url="https://api.deepseek.com"
+)
+
 app = FastAPI()
 
 # 初始化 OCR 模型
@@ -37,7 +46,7 @@ def analyze_text(text: str):
         main_pos = pos_details[0]  # 主词性
 
         # 过滤掉标点符号和空白，只保留有意义的词汇
-        if main_pos in ['記号', '助詞', '助動詞'] and token.surface in [' ', '　', '。', '、']:
+        if main_pos in ['記号', '助詞', '助動詞'] and token.surface in [' ', '　', '。', '、','．','！','？','：']:
             continue
 
         results.append({
@@ -48,6 +57,29 @@ def analyze_text(text: str):
         })
     return results
 
+
+def get_ai_translation(text: str):
+    if not text.strip():
+        return ""
+
+    try:
+        start_time = time.time()
+        # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
+        response = client.chat.completions.create(
+            model="deepseek-chat",  # V3 模型，极速响应
+            messages=[
+                {"role": "system", "content": "你是一个漫画翻译器，直接返回译文。若有生僻动词，在译文后括号内标注[原型]"},
+                {"role": "user", "content": text},
+            ],
+            stream=False,
+            temperature=0.3,  # 降低随机性，让翻译更稳定
+            max_tokens=150  # 限制输出长度，减少传输耗时
+        )
+        duration = time.time() - start_time
+        print(f"AI 响应耗时: {duration:.2f}s")
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"翻译出错了: {str(e)}"
 
 @app.post("/ocr")
 async def perform_ocr(payload: dict = Body(...)):
@@ -61,21 +93,20 @@ async def perform_ocr(payload: dict = Body(...)):
         image = Image.open(io.BytesIO(img_data))
         text = mocr(image)
 
-        # 2. 本地分词 (耗时通常 < 20ms)
+        # 2. 调用 AI 翻译 (云端，约 1s)
+        translation = get_ai_translation(text)
+
+        # 3. 本地分词 (本地，毫秒级)
         words = analyze_text(text)
 
-        print(f"OCR: {text}")
-        print(f"Words: {[w['s'] for w in words]}")
-
-        # 3. 返回组合数据
         return {
             "status": "success",
-            "text": text,  # 原始字符串
-            "words": words  # 分词后的列表对象
+            "text": text,
+            "translation": translation,
+            "words": words
         }
     except Exception as e:
-        print(f"Error: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": str(e)}`
 
 
 if __name__ == "__main__":
