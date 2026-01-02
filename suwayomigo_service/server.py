@@ -32,81 +32,126 @@ mocr = MangaOcr()
 print("Initializing Tokenizer...")
 tokenizer = Tokenizer()
 
-def get_smart_crop(image_bytes, click_x, click_y):
+
+def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
+    """
+        针对前端固定 600x600 输入优化的切图算法
+        click_x_rel, click_y_rel: 点击点在 600x600 局部图中的相对坐标
+        """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None: return None
-    h, w = img.shape[:2]
-    # 【调试】在图上画一个红点，看看点击位置对不对
-    #debug_img = img.copy()
-    #cv2.circle(debug_img, (click_x, click_y), 5, (0, 0, 255), -1)
-    #cv2.imwrite("debug_click_point.png", debug_img)
+    h, w = img.shape[:2]  # 此时 h, w 理论上都是 600
 
-    # 1. 预处理：灰度化
+    cx, cy = int(click_x_rel), int(click_y_rel)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    # 2. 自动纠偏逻辑
-    # 显式将坐标转为 int，防止从 JSON 传来的是 float
-    cx, cy = int(click_x), int(click_y)
+    # --- 1. 自动纠偏（固定半径 20px） ---
+    search_radius = 20
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    min_y, max_y = max(0, cy - search_radius), min(h, cy + search_radius)
+    min_x, max_x = max(0, cx - search_radius), min(w, cx + search_radius)
+    sub = blurred[min_y:max_y, min_x:max_x]
 
-    if gray[cy, cx] < 150:
-        radius = 15
-        min_y, max_y = max(0, cy - radius), min(h, cy + radius)
-        min_x, max_x = max(0, cx - radius), min(w, cx + radius)
-        sub_region = gray[min_y:max_y, min_x:max_x]
+    if sub.size > 0:
+        _, max_val, _, max_loc = cv2.minMaxLoc(sub)
+        if max_val > 180:
+            cx, cy = min_x + max_loc[0], min_y + max_loc[1]
 
-        if sub_region.size > 0:
-            _, max_val, _, max_loc = cv2.minMaxLoc(sub_region)
-            if max_val > 180:
-                cx = min_x + max_loc[0]
-                cy = min_y + max_loc[1]
-                print(f"--- 自动纠偏成功至: ({cx}, {cy}) ---")
-
-    # 3. 魔法棒算法 (FloodFill)
-    # 【修复重点】：mask 必须是 uint8，且大小为 (h+2, w+2)
+    # --- 2. 魔法棒探测 ---
     ff_mask = np.zeros((h + 2, w + 2), np.uint8)
-
-    # 【修复重点】：loDiff 和 upDiff 建议传入元组格式 (Scalar)
-    # 即使是灰度图，也推荐使用 (value,) 或 (value, value, value)
-    diff = (20,)
-
-    # 复制一份用于填充（FloodFill 会直接修改原图）
     flood_filled = gray.copy()
-
-    cv2.floodFill(
-        image=flood_filled,
-        mask=ff_mask,
-        seedPoint=(cx, cy),
-        newVal=255,
-        loDiff=diff,
-        upDiff=diff,
-        flags=cv2.FLOODFILL_FIXED_RANGE
-    )
-
-    # 提取生成的 mask（去掉外围的 2 像素边缘）
+    # 稍微放宽容差值（18, 18），更适合 600px 的文字密度
+    cv2.floodFill(flood_filled, ff_mask, (cx, cy), 255, (18,), (18,), cv2.FLOODFILL_FIXED_RANGE)
     bubble_mask = ff_mask[1:-1, 1:-1] * 255
 
-    # 4. 闭运算 + 空洞填充
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 35))
-    bubble_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_CLOSE, kernel)
-
-    # 填充所有闭合轮廓内部
     cnts, _ = cv2.findContours(bubble_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    for c in cnts:
-        cv2.drawContours(bubble_mask, [c], 0, 255, -1)
-
-    # 5. 寻找并切图
+    is_leaking = False
     if cnts:
-        for c in cnts:
-            x, y, rw, rh = cv2.boundingRect(c)
-            # 再次确认点在轮廓内
-            if x <= cx <= x + rw and y <= cy <= y + rh:
-                if rw < w * 0.98:
-                    x_n, y_n = max(0, x - 15), max(0, y - 15)
-                    w_n, h_n = min(w - x_n, rw + 30), min(h - y_n, rh + 30)
-                    return img[y_n:y_n + h_n, x_n:x_n + w_n]
+        c = max(cnts, key=cv2.contourArea)
+        x, y, rw, rh = cv2.boundingRect(c)
+        # 600px 下，如果选区宽度超过 520 或面积过大，判定为漏水
+        if rw > 520 or rh > 520 or cv2.contourArea(c) > (600 * 600 * 0.4):
+            is_leaking = True
+    else:
+        is_leaking = True
 
-    return img
+    # --- 3. 逻辑分支 ---
+    if not is_leaking:
+        # 情况 A：气泡捕获，使用固定 25px 闭运算
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+        bubble_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_CLOSE, kernel)
+        cnts, _ = cv2.findContours(bubble_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        c = max(cnts, key=cv2.contourArea)
+        x, y, rw, rh = cv2.boundingRect(c)
+        pad = 10
+    else:
+        # 情况 B：边缘雷达增强模式
+        print("--- 模式：增强雷达探测 ---")
+        edges = cv2.Canny(gray, 50, 150)
+
+        # 使用更大的、且具有方向性的核（50x50），把更远的字也“粘”过来
+        # 增加一个专门针对漫画排版（横竖都有可能）的闭合操作
+        kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (45, 45))
+        dilated = cv2.dilate(edges, kernel_large)
+
+        r_cnts, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        target_box = None
+        for rc in r_cnts:
+            rx, ry, rrw, rrh = cv2.boundingRect(rc)
+            if rx <= cx <= rx + rrw and ry <= cy <= ry + rrh:
+                target_box = [rx, ry, rrw, rrh]
+                break
+
+        if target_box:
+            # --- 【核心改进点】：二次聚类探测 ---
+            # 找到包含点击点的块后，在它附近（比如 60 像素内）再找找有没有其他块
+            # 这能防止“只识别一个字”的情况
+            tx, ty, tw, th = target_box
+            expansion_pixel = 60  # 扩张查找范围
+            final_x1, final_y1 = tx, ty
+            final_x2, final_y2 = tx + tw, ty + th
+
+            for rc in r_cnts:
+                rx, ry, rrw, rrh = cv2.boundingRect(rc)
+                # 如果这个块离我们目标块很近，就把它并进来
+                if (abs(rx - (tx + tw)) < expansion_pixel or abs(tx - (rx + rrw)) < expansion_pixel) and \
+                        (abs(ry - ty) < 100 or abs(ty - ry) < 100):
+                    final_x1 = min(final_x1, rx)
+                    final_y1 = min(final_y1, ry)
+                    final_x2 = max(final_x2, rx + rrw)
+                    final_y2 = max(final_y2, ry + rrh)
+
+            x, y, rw, rh = final_x1, final_y1, final_x2 - final_x1, final_y2 - final_y1
+            pad = 20
+        else:
+            # 最终保底：返回中心区域
+            x, y, rw, rh, pad = cx - 150, cy - 100, 300, 200, 0
+
+    # --- 4. 最终裁剪并确保不越界 ---
+    x1, y1 = max(0, x - pad), max(0, y - pad)
+    x2, y2 = min(w, x + rw + pad), min(h, y + rh + pad)
+
+    # --- 调试代码开始 (插入在 return 之前) ---
+    debug_img = img.copy()
+    # 画出最终确定的矩形框 (红色，粗细为 3)
+    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+    # 画出点击的原始坐标点 (蓝色小圆点)
+    cv2.circle(debug_img, (int(click_x_rel), int(click_y_rel)), 5, (255, 0, 0), -1)
+
+    # 保存调试图片到后端服务器目录下
+    cv2.imwrite("debug_result.png", debug_img)
+
+    # 如果想看雷达探测时的“胶水”粘连效果，可以保存这个
+    if is_leaking:
+        # 这里假设 dilated 是你在雷达模式下生成的变量
+        cv2.imwrite("debug_radar_mask.png", dilated)
+    else:
+        cv2.imwrite("debug_bubble_mask.png", bubble_mask)
+    # --- 调试代码结束 ---
+
+    return img[y1:y2, x1:x2]
 
 def analyze_text(text: str):
     """

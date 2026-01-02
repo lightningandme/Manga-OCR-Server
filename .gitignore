@@ -140,3 +140,4 @@ cython_debug/
 .idea/
 
 #我的调试文件
+suwayomigo_service/*.png
