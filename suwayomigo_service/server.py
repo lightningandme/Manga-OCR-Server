@@ -70,8 +70,8 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
     if cnts:
         c = max(cnts, key=cv2.contourArea)
         x, y, rw, rh = cv2.boundingRect(c)
-        # 600px 下，如果选区宽度超过 520 或面积过大，判定为漏水
-        if rw > 520 or rh > 520 or cv2.contourArea(c) > (600 * 600 * 0.4):
+        # 允许气泡占据宽度的 85% 或高度的 85%，面积不超过总面积的 40%
+        if rw > w * 0.85 or rh > h * 0.95 or cv2.contourArea(c) > (w * h * 0.7):
             is_leaking = True
     else:
         is_leaking = True
@@ -79,6 +79,7 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
     # --- 3. 逻辑分支 ---
     if not is_leaking:
         # 情况 A：气泡捕获，使用固定 25px 闭运算
+        print("--- 模式：对话气泡捕获 ---")
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
         bubble_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_CLOSE, kernel)
         cnts, _ = cv2.findContours(bubble_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -86,48 +87,150 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
         x, y, rw, rh = cv2.boundingRect(c)
         pad = 10
     else:
-        # 情况 B：边缘雷达增强模式
-        print("--- 模式：增强雷达探测 ---")
-        edges = cv2.Canny(gray, 50, 150)
+        # --- 模式：定向流向聚合 (针对多列排版优化) ---
+        print("--- 模式：定向流向聚合 ---")
 
-        # 使用更大的、且具有方向性的核（50x50），把更远的字也“粘”过来
-        # 增加一个专门针对漫画排版（横竖都有可能）的闭合操作
-        kernel_large = cv2.getStructuringElement(cv2.MORPH_RECT, (45, 45))
-        dilated = cv2.dilate(edges, kernel_large)
+        # 1. 依然保留高光+边缘的双通道提取（这部分效果很好）
+        _, bright_mask = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY)
+        edges = cv2.Canny(gray, 60, 180)
+        combined_features = cv2.bitwise_or(edges, bright_mask)
+
+        # 2. 稍微减小一点膨胀力度，让字与字之间先保持一点距离
+        # 之前是 (40, 5) 和 (5, 40)，这里稍微收敛一点，依赖后面的逻辑去连
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 30))
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
+        dilated = cv2.dilate(combined_features, kernel_v)
+        dilated = cv2.dilate(dilated, kernel_h)
+
+        # 保存调试图
+        cv2.imwrite("debug_radar_mask.png", dilated)
 
         r_cnts, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        target_box = None
-        for rc in r_cnts:
+        # 收集所有候选块，并过滤掉太大的（比如漫画边框）
+        candidates = []
+        seed_idx = -1
+
+        for i, rc in enumerate(r_cnts):
             rx, ry, rrw, rrh = cv2.boundingRect(rc)
+            # 过滤掉几乎占满全图的边框噪音
+            if rrw > w * 0.95 or rrh > h * 0.95:
+                continue
+
+            candidates.append((rx, ry, rrw, rrh))
+
+            # 找到点击点所在的块
             if rx <= cx <= rx + rrw and ry <= cy <= ry + rrh:
-                target_box = [rx, ry, rrw, rrh]
-                break
+                seed_idx = len(candidates) - 1
 
-        if target_box:
-            # --- 【核心改进点】：二次聚类探测 ---
-            # 找到包含点击点的块后，在它附近（比如 60 像素内）再找找有没有其他块
-            # 这能防止“只识别一个字”的情况
-            tx, ty, tw, th = target_box
-            expansion_pixel = 60  # 扩张查找范围
-            final_x1, final_y1 = tx, ty
-            final_x2, final_y2 = tx + tw, ty + th
+        if seed_idx != -1:
+            # --- 【核心改进】：动态生长 + 对齐优先聚合 ---
 
-            for rc in r_cnts:
-                rx, ry, rrw, rrh = cv2.boundingRect(rc)
-                # 如果这个块离我们目标块很近，就把它并进来
-                if (abs(rx - (tx + tw)) < expansion_pixel or abs(tx - (rx + rrw)) < expansion_pixel) and \
-                        (abs(ry - ty) < 100 or abs(ty - ry) < 100):
-                    final_x1 = min(final_x1, rx)
-                    final_y1 = min(final_y1, ry)
-                    final_x2 = max(final_x2, rx + rrw)
-                    final_y2 = max(final_y2, ry + rrh)
+            # 初始化聚合集合
+            merged_indices = {seed_idx}
 
-            x, y, rw, rh = final_x1, final_y1, final_x2 - final_x1, final_y2 - final_y1
+            # 两个核心阈值
+            # 1. FLOW_GAP: 顺着文字流向（如竖排的上下）允许的最大间断距离
+            FLOW_GAP = 120  # 稍微给大点，应对一些艺术排版的大空隙
+            # 2. CROSS_GAP: 垂直于流向（如竖排的换列）允许的最大偏离距离
+            CROSS_GAP = 15  # 必须很小，防止连到隔壁列去
+
+            has_new_merge = True
+
+            while has_new_merge:
+                has_new_merge = False
+
+                # 1. 获取当前大团块的尺寸和边界
+                current_rects = [candidates[i] for i in merged_indices]
+                min_x = min([r[0] for r in current_rects])
+                min_y = min([r[1] for r in current_rects])
+                max_x = max([r[0] + r[2] for r in current_rects])
+                max_y = max([r[1] + r[3] for r in current_rects])
+                curr_w = max_x - min_x
+                curr_h = max_y - min_y
+
+                # 2. 动态判断当前大团块的流向
+                # 随着合并的进行，is_vertical 可能会从 False 变成 True
+                is_vertical = curr_h > curr_w * 1.1
+                is_horizontal = curr_w > curr_h * 1.1
+                # 如果都不是，说明还是个方块（ambiguous），此时依靠对齐度来判断
+
+                # 3. 遍历寻找可以吞噬的邻居
+                for i in range(len(candidates)):
+                    if i in merged_indices: continue
+
+                    ox, oy, ow, oh = candidates[i]
+                    ox2, oy2 = ox + ow, oy + oh
+
+                    should_merge = False
+
+                    # 计算投影重叠度（判断对齐）
+                    # X轴重叠长度 / 较小的那一个宽度
+                    overlap_x = max(0, min(max_x, ox2) - max(min_x, ox))
+                    ratio_align_v = overlap_x / min(curr_w, ow) if min(curr_w, ow) > 0 else 0
+
+                    # Y轴重叠长度 / 较小的那一个高度
+                    overlap_y = max(0, min(max_y, oy2) - max(min_y, oy))
+                    ratio_align_h = overlap_y / min(curr_h, oh) if min(curr_h, oh) > 0 else 0
+
+                    # 计算间距
+                    dist_x = max(0, max(min_x, ox) - min(max_x, ox2))
+                    dist_y = max(0, max(min_y, oy) - min(max_y, oy2))
+
+                    # === 判定逻辑 A: 明确的竖排模式 ===
+                    if is_vertical:
+                        # 必须在X轴高度对齐 (同一列) 且 Y轴距离在允许范围内
+                        # 或者 距离极近的标点符号
+                        if (ratio_align_v > 0.5 and dist_y < FLOW_GAP) or (dist_x < CROSS_GAP and dist_y < CROSS_GAP):
+                            should_merge = True
+
+                    # === 判定逻辑 B: 明确的横排模式 ===
+                    elif is_horizontal:
+                        # 必须在Y轴高度对齐 (同一行) 且 X轴距离在允许范围内
+                        if (ratio_align_h > 0.5 and dist_x < FLOW_GAP) or (dist_x < CROSS_GAP and dist_y < CROSS_GAP):
+                            should_merge = True
+
+                    # === 判定逻辑 C: 方块/不定状态 (关键修复点) ===
+                    else:
+                        # 既不横也不竖，说明是初始种子。
+                        # 策略：谁跟我对其最准，我就跟谁连！
+
+                        # 如果跟下方/上方方块 X轴对齐度极高 -> 尝试竖向合并
+                        if ratio_align_v > 0.6 and dist_y < FLOW_GAP:
+                            should_merge = True
+
+                        # 如果跟左边/右边方块 Y轴对齐度极高 -> 尝试横向合并
+                        elif ratio_align_h > 0.6 and dist_x < FLOW_GAP:
+                            should_merge = True
+
+                        # 保底：如果距离特别近，不管对齐不对齐都吸进来 (处理标点)
+                        elif dist_x < 20 and dist_y < 20:
+                            should_merge = True
+
+                    if should_merge:
+                        merged_indices.add(i)
+                        has_new_merge = True
+                        # 只要有一个新块加进来，就会改变大团块的宽高比
+                        # 下一次循环就会根据新的形状重新判断 is_vertical/is_horizontal
+                        # 从而触发“连锁反应”
+                        break  # 重新计算大包围盒，进入下一次 while 循环
+
+            # 最终输出
+            x, y = min_x, min_y
+            rw, rh = max_x - min_x, max_y - min_y
             pad = 20
         else:
-            # 最终保底：返回中心区域
-            x, y, rw, rh, pad = cx - 150, cy - 100, 300, 200, 0
+            # 保底
+            print("--- 模式：触发保底识别范围 ---")
+            # --- 改进的动态保底逻辑 ---
+            # 定义保底框占原图的比例（例如：宽占 50%，高占 25%）
+            fallback_w = int(w * 0.6)
+            fallback_h = int(h * 0.8)
+
+            # 计算起始坐标，使点击点处于框的中心
+            x = cx - (fallback_w // 2)
+            y = cy - (fallback_h // 2)
+            rw, rh, pad = fallback_w, fallback_h, 0
 
     # --- 4. 最终裁剪并确保不越界 ---
     x1, y1 = max(0, x - pad), max(0, y - pad)
@@ -142,14 +245,6 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
 
     # 保存调试图片到后端服务器目录下
     cv2.imwrite("debug_result.png", debug_img)
-
-    # 如果想看雷达探测时的“胶水”粘连效果，可以保存这个
-    if is_leaking:
-        # 这里假设 dilated 是你在雷达模式下生成的变量
-        cv2.imwrite("debug_radar_mask.png", dilated)
-    else:
-        cv2.imwrite("debug_bubble_mask.png", bubble_mask)
-    # --- 调试代码结束 ---
 
     return img[y1:y2, x1:x2]
 
