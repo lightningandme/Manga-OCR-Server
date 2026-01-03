@@ -274,7 +274,7 @@ def analyze_text(text: str):
     return results
 
 
-def get_ai_translation(text: str):
+def get_ai_translation(text: str, manga_name: str):
     if not text.strip():
         return ""
 
@@ -282,10 +282,19 @@ def get_ai_translation(text: str):
         start_time = time.time()
         # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
         # noinspection PyTypeChecker
+
+        # 按照你提供的 Prompt 模板构建 System Content
+        system_content = (
+            f"你是一位精通多门语言的漫画翻译专家。"
+            f"当前语境：正在阅读漫画《{manga_name}》。"
+            f"请根据该作品的风格（热血/少女/日常等）、背景设定和角色身份，"
+            f"将输入的日文翻译成地道、流畅的中文。直接返回译文。"
+        )
+
         response = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
-                {"role": "system", "content": "你是一个漫画翻译器，直接返回译文。若有生僻动词，在译文后括号内标注[原型]"},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": text},
             ],
             stream=False,
@@ -293,22 +302,26 @@ def get_ai_translation(text: str):
             max_tokens=150  # 限制输出长度，减少传输耗时
         )
         duration = time.time() - start_time
-        print(f"AI 响应耗时: {duration:.2f}s")
+        print(f"AI 响应耗时: {duration:.2f}s (作品: {manga_name})")
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"翻译出错了: {str(e)}"
 
 
-# 缓存最近一次的 OCR 文本，方便第二个请求直接获取
+# 缓存最近一次的 OCR 文本和漫画名
 last_ocr_text = ""
+last_manga_name = "General"
 @app.post("/ocr")
 async def perform_ocr(payload: dict = Body(...)):
-    global last_ocr_text  # 必须声明：我要修改的是外面那个全局变量
+    global last_ocr_text, last_manga_name  # <--- 修改这里，加入 last_manga_name
     last_ocr_text = ""  # 每次识别新图前先清空旧缓存
     img_b64 = payload.get("image")
     # 获取 Android 传来的点击坐标
     click_x = payload.get("x", 0)
     click_y = payload.get("y", 0)
+    manga_name = payload.get("mangaName", "General")
+
+    last_manga_name = manga_name  # <--- 核心修改：将本次漫画名存入缓存
     if not img_b64:
         return {"status": "error", "message": "No image data"}
 
@@ -344,12 +357,12 @@ async def perform_ocr(payload: dict = Body(...)):
 
 @app.get("/get_translation")
 async def get_translation():
-    global last_ocr_text  # 读取全局变量
+    global last_ocr_text, last_manga_name  # <--- 声明读取这两个全局变量
     if not last_ocr_text:
         return {"translation": "未检测到待翻译文字"}
 
-    # 这里调用你之前的 DeepSeek 翻译函数
-    translation = get_ai_translation(last_ocr_text)
+    # 调用时传入缓存的漫画名
+    translation = get_ai_translation(last_ocr_text, last_manga_name)
     return {"translation": translation}
 
 
