@@ -6,6 +6,7 @@ import numpy as np
 import uvicorn
 from PIL import Image
 from fastapi import FastAPI, Body
+from dotenv import load_dotenv
 
 # 关键：将项目根目录加入系统路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -16,10 +17,16 @@ from janome.tokenizer import Tokenizer
 from openai import OpenAI
 import time
 
+# 加载当前目录下的 .env 文件
+load_dotenv()
+
+# 从环境变量中读取
+api_key = os.getenv("DEEPSEEK_API_KEY")
+base_url = os.getenv("DEEPSEEK_BASE_URL")
 # --- 配置 DeepSeek ---
 client = OpenAI(
-    api_key="sk-77aef9337e7648f58754965460002864",
-    base_url="https://api.deepseek.com"
+    api_key=api_key,
+    base_url=base_url
 )
 
 app = FastAPI()
