@@ -17,6 +17,10 @@ from janome.tokenizer import Tokenizer
 from openai import OpenAI
 import time
 
+import warnings
+# 屏蔽掉来自 huggingface_hub 的 FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+
 # 加载当前目录下的 .env 文件
 load_dotenv()
 
@@ -77,9 +81,20 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
     if cnts:
         c = max(cnts, key=cv2.contourArea)
         x, y, rw, rh = cv2.boundingRect(c)
-        # 允许气泡占据宽度的 85% 或高度的 85%，面积不超过总面积的 40%
-        if rw > w * 0.85 or rh > h * 0.95 or cv2.contourArea(c) > (w * h * 0.7):
+        area = cv2.contourArea(c)
+
+        # 【关键改进】：多维度判定“这到底是不是个气泡”
+        # 1. 面积太大 (超过 60%)
+        # 2. 形状太方 (气泡通常是圆润或椭圆的，如果宽高比接近全图且填满了矩形，通常是背景)
+        rect_area = rw * rh
+        solidity = area / float(rect_area) if rect_area > 0 else 0
+
+        if rw > w * 0.8 or rh > h * 0.8 or area > (w * h * 0.6):
             is_leaking = True
+        # 3. 如果选中区域是一个非常方正的大色块（solidity很高且面积不小），通常是背景漏气
+        elif solidity > 0.9 and area > (w * h * 0.3):
+            is_leaking = True
+            print("🛡️ 检测到高实心度大色块，疑似背景漏气，切换聚合模式")
     else:
         is_leaking = True
 
@@ -97,13 +112,20 @@ def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
         # --- 模式：定向流向聚合 (针对多列排版优化) ---
         print("--- 模式：定向流向聚合 ---")
 
-        # 1. 依然保留高光+边缘的双通道提取（这部分效果很好）
-        _, bright_mask = cv2.threshold(gray, 210, 255, cv2.THRESH_BINARY)
+        # 1. 常规边缘
         edges = cv2.Canny(gray, 60, 180)
-        combined_features = cv2.bitwise_or(edges, bright_mask)
+        # 2. 常规高光 (抓白字/白边)
+        _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        # 3. 局部对比度 (专门对付黑底黑字+白边)
+        # 它能识别出黑背景中细微的亮度变化
+        adaptive_mask = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                              cv2.THRESH_BINARY_INV, 15, 8)
 
-        # 2. 稍微减小一点膨胀力度，让字与字之间先保持一点距离
-        # 之前是 (40, 5) 和 (5, 40)，这里稍微收敛一点，依赖后面的逻辑去连
+        # 融合
+        combined_features = cv2.bitwise_or(edges, bright_mask)
+        combined_features = cv2.bitwise_or(combined_features, adaptive_mask)
+
+        # 这里的膨胀保持你原来的 (3, 30) 和 (30, 3)，不要变
         kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 30))
         kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
         dilated = cv2.dilate(combined_features, kernel_v)
