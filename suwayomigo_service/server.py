@@ -282,6 +282,7 @@ def analyze_text(text: str):
 
 
 def get_ai_translation(text: str, manga_name: str):
+    manga, episode = manga_name.rsplit(':', 1) if ':' in manga_name else ("日本漫画","某一话")
     if not text.strip():
         return ""
 
@@ -292,10 +293,12 @@ def get_ai_translation(text: str, manga_name: str):
 
         # 按照你提供的 Prompt 模板构建 System Content
         system_content = (
-            f"你是一位精通多门语言的漫画翻译专家。"
-            f"当前语境：正在阅读漫画《{manga_name}》。"
-            f"请根据该作品的风格（热血/少女/日常等）、背景设定和角色身份，"
-            f"将输入的日文翻译成地道、流畅的中文。直接返回译文。"
+            f"你是一位精通多门语言的日本漫画翻译专家，正在阅读《{manga}》的{episode}。 \n"
+            "你的任务是处理来自 OCR 识别的原文，并完成以下三步：\n"
+            "1. **文本校对**：判断识别结果中是否存在因笔画密集导致的错别字，请结合语境将其修正（例如将错误的形近字还原为正确的词汇）。\n"
+            "2. **逻辑断句**：判断因漫画排版导致的非正常连字，并进行逻辑断行或增加标点，还原角色真实的说话节奏。\n"
+            "3. **地道翻译**：基于修正后的原文，结合该作品在此阶段的剧情背景和角色身份进行翻译。\n\n"
+            "请翻译成地道、流畅的中文。直接返回译文。"
         )
 
         response = client.chat.completions.create(
@@ -309,7 +312,7 @@ def get_ai_translation(text: str, manga_name: str):
             max_tokens=150  # 限制输出长度，减少传输耗时
         )
         duration = time.time() - start_time
-        print(f"AI 响应耗时: {duration:.2f}s (作品: {manga_name})")
+        print(f"AI翻译 响应耗时: {duration:.2f}s (正在看: 《{manga}》的{episode})")
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"翻译出错了: {str(e)}"
