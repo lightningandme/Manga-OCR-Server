@@ -42,8 +42,8 @@ tokenizer = Tokenizer()
 
 def get_smart_crop(image_bytes, click_x_rel, click_y_rel):
     """
-        针对前端固定 600x600 输入优化的切图算法
-        click_x_rel, click_y_rel: 点击点在 600x600 局部图中的相对坐标
+        针对前端输入优化的切图算法
+        click_x_rel, click_y_rel: 点击点在局部图中的相对坐标
         """
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -339,17 +339,23 @@ async def perform_ocr(payload: dict = Body(...)):
         # --- 智能切图核心调用 ---
         # 注意：这里的 img_data 是 Android 传来的 400x400 或 600x600 的局部图
         # 这里的 click_x/y 应该是相对于这张局部图的坐标
+        start_time = time.time()
         smart_img_mat = get_smart_crop(img_data, click_x, click_y)
 
         # 将 OpenCV 的 Mat 转回 PIL Image 给 Manga-OCR 使用
         smart_img_rgb = cv2.cvtColor(smart_img_mat, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(smart_img_rgb)
+        duration = time.time() - start_time
+        print(f"图片截取 响应耗时: {duration:.2f}s")
 
         # 后续 OCR 逻辑不变
+        start_time = time.time()
         text = mocr(image)
         last_ocr_text = text  # 存入缓存
 
         words = analyze_text(text)
+        duration = time.time() - start_time
+        print(f"文本处理 响应耗时: {duration:.2f}s")
 
         # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
         return {
