@@ -1,0 +1,351 @@
+import base64
+import os
+import sys
+import cv2
+import numpy as np
+import uvicorn
+from PIL import Image
+from fastapi import FastAPI, Body
+from dotenv import load_dotenv
+import torch
+import easyocr
+import time
+import warnings
+
+# 屏蔽掉来自 huggingface_hub 的 FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+# 关键：将项目根目录加入系统路径
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from manga_ocr import MangaOcr
+from janome.tokenizer import Tokenizer
+from openai import OpenAI
+
+# 加载当前目录下的 .env 文件
+load_dotenv()
+
+# 从环境变量中读取
+api_key = os.getenv("DEEPSEEK_API_KEY")
+base_url = os.getenv("DEEPSEEK_BASE_URL")
+# --- 配置 DeepSeek ---
+client = OpenAI(
+    api_key=api_key,
+    base_url=base_url
+)
+
+app = FastAPI()
+
+# 1. 初始化检测器 (只开启检测功能，不开启识别，速度极快)
+print("Initializing CRAFT Text Detector...")
+gpu_available = torch.cuda.is_available()
+reader = easyocr.Reader(['ja'], gpu=gpu_available)
+
+# 初始化 OCR 模型
+print("Loading Manga-OCR model...")
+mocr = MangaOcr()
+
+# 初始化 Janome 分词器 (本地运行，极快)
+tokenizer = Tokenizer()
+
+
+def is_blocked_by_line(img_gray, pt1, pt2):
+    """
+    探测两点之间是否有明显的线条阻隔
+    """
+    # 1. 局部二值化，获取边缘线条
+    # 使用 Canny 提取明显的线条（分镜线或对话框线）
+    edges = cv2.Canny(img_gray, 50, 150)
+
+    # 2. 在两点间线性采样
+    num_samples = 10
+    points_x = np.linspace(pt1[0], pt2[0], num_samples).astype(int)
+    points_y = np.linspace(pt1[1], pt2[1], num_samples).astype(int)
+
+    hits = 0
+    h, w = edges.shape
+    for i in range(num_samples):
+        px, py = points_x[i], points_y[i]
+        if 0 <= px < w and 0 <= py < h:
+            # 检查采样点及其周围极小范围是否有强边缘
+            if np.any(edges[max(0, py - 1):min(h, py + 1), max(0, px - 1):min(w, px + 1)] > 0):
+                hits += 1
+
+    # 如果有超过 2 个点撞墙，认为存在物理阻隔
+    return hits >= 2
+
+
+def get_smart_crop(image_bytes, click_x, click_y):
+    nparr = np.frombuffer(image_bytes, np.uint8)
+    img_cv2 = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img_cv2 is None: return None
+
+    h_img, w_img = img_cv2.shape[:2]
+    gray = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2GRAY)
+    debug_vis = img_cv2.copy()
+
+    # 1. 语义检测 (EasyOCR)
+    horizontal_list, _ = reader.detect(img_cv2, text_threshold=0.5, link_threshold=0.4, low_text=0.3)
+    raw_boxes = horizontal_list[0] if horizontal_list else []
+
+    if not raw_boxes:
+        return fallback_crop(img_cv2, click_x, click_y, "No Boxes Found", debug_vis)
+
+    # === 调试代码：绘制原始火柴盒 ===
+    debug_boxes_img = img_cv2.copy()
+    for i, b in enumerate(raw_boxes):
+        # b 的格式取决于你使用的检测器，EasyOCR detect() 通常返回 [xmin, xmax, ymin, ymax]
+        bx1, bx2, by1, by2 = map(int, b)
+        # 画出原始火柴盒（绿色）
+        cv2.rectangle(debug_boxes_img, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+        # 标注序号，方便追踪
+        cv2.putText(debug_boxes_img, str(i), (bx1, by1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+    # 画出点击点（红色）
+    cv2.circle(debug_boxes_img, (click_x, click_y), 5, (0, 0, 255), -1)
+    # 保存调试图
+    cv2.imwrite("debug_raw_fireboxes.png", debug_boxes_img)
+    print(f"🖼️ 原始火柴盒调试图已保存至: debug_raw_fireboxes.png (共 {len(raw_boxes)} 个)")
+    # ============================
+    # 2. 聚类逻辑 (V8.8 物理隔离版)
+    grouped_boxes = []
+    used = [False] * len(raw_boxes)
+    avg_line_h = np.mean([b[3] - b[2] for b in raw_boxes]) if raw_boxes else 30
+
+    for i in range(len(raw_boxes)):
+        if used[i]: continue
+        current_cluster = [raw_boxes[i]]
+        used[i] = True
+
+        found_new = True
+        while found_new:
+            found_new = False
+            c_x1 = min(b[0] for b in current_cluster)
+            c_x2 = max(b[1] for b in current_cluster)
+            c_y1 = min(b[2] for b in current_cluster)
+            c_y2 = max(b[3] for b in current_cluster)
+
+            center_curr = ((c_x1 + c_x2) / 2, (c_y1 + c_y2) / 2)
+
+            for j in range(len(raw_boxes)):
+                if used[j]: continue
+                bx1, bx2, by1, by2 = raw_boxes[j]
+                center_next = ((bx1 + bx2) / 2, (by1 + by2) / 2)
+
+                dx = max(0, c_x1 - bx2, bx1 - c_x2)
+                dy = max(0, c_y1 - by2, by1 - c_y2)
+
+                # 判定条件 1: 基础几何距离
+                if dy < avg_line_h * 1.2 and dx < avg_line_h * 0.6:
+
+                    # --- V8.8 核心逻辑：分界线穿透检测 ---
+                    if is_blocked_by_line(gray, center_curr, center_next):
+                        # print(f"🚫 拦截：探测到物理线条阻隔，拒绝合并 B{i} 和 B{j}")
+                        continue
+
+                    current_cluster.append(raw_boxes[j])
+                    used[j] = True
+                    found_new = True
+
+        grouped_boxes.append((min(b[0] for b in current_cluster),
+                              max(b[1] for b in current_cluster),
+                              min(b[2] for b in current_cluster),
+                              max(b[3] for b in current_cluster)))
+
+    print(f"📦 [Step 2] 聚类完成，隔离后合并为 {len(grouped_boxes)} 个文本块")
+
+    # --- 3. 匹配与调试图片 (同前) ---
+    best_box = None
+    min_dist = float('inf')
+    slack = 15  # 缩小点击感应区，提高精准度
+
+    for idx, box in enumerate(grouped_boxes):
+        x1, x2, y1, y2 = map(int, box)
+        cv2.rectangle(debug_vis, (x1, y1), (x2, y2), (255, 100, 0), 2)
+
+        # 命中判定：优先判定点击点是否在内部
+        if (x1 - slack) <= click_x <= (x2 + slack) and (y1 - slack) <= click_y <= (y2 + slack):
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            dist = ((click_x - cx) ** 2 + (click_y - cy) ** 2) ** 0.5
+            if dist < min_dist:
+                min_dist = dist
+                best_box = (x1, x2, y1, y2)
+
+    # 如果没命中，寻找全局最近
+    if best_box is None:
+        print("🔍 未直接命中，寻找最近文本块...")
+        for box in grouped_boxes:
+            x1, x2, y1, y2 = map(int, box)
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            dist = ((click_x - cx) ** 2 + (click_y - cy) ** 2) ** 0.5
+            if dist < min_dist:
+                min_dist = dist
+                best_box = (x1, x2, y1, y2)
+
+    # --- 4. 最终判定 ---
+    if best_box:
+        # 距离限制改为更合理的 300px (或者短边的 1/4)
+        max_limit = min(h_img, w_img) / 3
+        if min_dist > 0 and min_dist > max_limit:
+            return fallback_crop(img_cv2, click_x, click_y, "Too Far From Blocks", debug_vis)
+
+        x1, x2, y1, y2 = best_box
+        # 优化 Padding，不要太大
+        pw, ph = int((x2 - x1) * 0.1) + 10, int((y2 - y1) * 0.05) + 10
+        cx1, cy1 = max(0, x1 - pw), max(0, y1 - ph)
+        cx2, cy2 = min(w_img, x2 + pw), min(h_img, y2 + ph)
+
+        # 最终调试绘图
+        cv2.rectangle(debug_vis, (cx1, cy1), (cx2, cy2), (0, 255, 255), 2)  # 黄色裁剪框
+        cv2.circle(debug_vis, (click_x, click_y), 6, (0, 0, 255), -1)  # 红色点击点
+        cv2.imwrite("debug_easyocr.png", debug_vis)
+
+        return img_cv2[cy1:cy2, cx1:cx2]
+
+    return fallback_crop(img_cv2, click_x, click_y, "End of Logic", debug_vis)
+
+
+def fallback_crop(img, cx, cy, reason, debug_vis=None):
+    print(f"🩹 [Fallback] 原因: {reason}")
+    h, w = img.shape[:2]
+    d = 200
+    x1, y1 = max(0, cx - d), max(0, cy - d)
+    x2, y2 = min(w, cx + d), min(h, cy + d)
+
+    if debug_vis is not None:
+        cv2.rectangle(debug_vis, (x1, y1), (x2, y2), (0, 0, 255), 3)  # 保底框用红色
+        cv2.circle(debug_vis, (cx, cy), 7, (0, 0, 255), -1)
+        cv2.putText(debug_vis, f"Fallback: {reason}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.imwrite("debug_easyocr.png", debug_vis)
+
+    return img[y1:y2, x1:x2]
+
+def analyze_text(text: str):
+    """
+    对日语文本进行分词，并提取学习相关的元数据
+    """
+    results = []
+    # 运行分词
+    tokens = tokenizer.tokenize(text)
+
+    for token in tokens:
+        # pos 格式通常为: 名詞,一般,*,*
+        pos_details = token.part_of_speech.split(',')
+        main_pos = pos_details[0]  # 主词性
+
+        # 过滤掉标点符号和空白，只保留有意义的词汇
+        if main_pos in ['記号', '助詞', '助動詞'] and token.surface in [' ', '　', '。', '、','．','！','？','：']:
+            continue
+
+        results.append({
+            "s": token.surface,  # 表面形：漫画里显示的原文
+            "b": token.base_form,  # 原型：查词典用的原始形态
+            "p": main_pos,  # 词性：名词、动词、形容词等
+            "r": token.reading  # 读音：片假名读音 (可选)
+        })
+    return results
+
+
+def get_ai_translation(text: str, manga_name: str):
+    manga, episode = manga_name.rsplit(':', 1) if ':' in manga_name else ("日本漫画","某一话")
+    if not text.strip():
+        return ""
+
+    try:
+        start_time = time.time()
+        # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
+        # noinspection PyTypeChecker
+
+        # 按照你提供的 Prompt 模板构建 System Content
+        system_content = (
+            f"你是一位精通多门语言的日本漫画翻译专家，正在阅读《{manga}》的{episode}。 \n"
+            "你的任务是处理来自 OCR 识别的原文，并完成以下三步：\n"
+            "1. **文本校对**：判断识别结果中是否存在因笔画密集导致的错别字，请结合语境将其修正（例如将错误的形近字还原为正确的词汇）。\n"
+            "2. **逻辑断句**：判断因漫画排版导致的非正常连字，并进行逻辑断行或增加标点，还原角色真实的说话节奏。\n"
+            "3. **地道翻译**：基于修正后的原文，结合该作品在此阶段的剧情背景和角色身份进行翻译。\n\n"
+            "请翻译成地道、流畅的中文。直接返回译文。"
+        )
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": text},
+            ],
+            stream=False,
+            temperature=0.3,  # 降低随机性，让翻译更稳定
+            max_tokens=150  # 限制输出长度，减少传输耗时
+        )
+        duration = time.time() - start_time
+        print(f"AI翻译 响应耗时: {duration:.2f}s (正在看: 《{manga}》的{episode})")
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"翻译出错了: {str(e)}"
+
+
+# 缓存最近一次的 OCR 文本和漫画名
+last_ocr_text = ""
+last_manga_name = "General"
+@app.post("/ocr")
+async def perform_ocr(payload: dict = Body(...)):
+    global last_ocr_text, last_manga_name  # <--- 修改这里，加入 last_manga_name
+    last_ocr_text = ""  # 每次识别新图前先清空旧缓存
+    img_b64 = payload.get("image")
+    # 获取 Android 传来的点击坐标
+    click_x = payload.get("x", 0)
+    click_y = payload.get("y", 0)
+    manga_name = payload.get("mangaName", "General")
+
+    last_manga_name = manga_name  # <--- 核心修改：将本次漫画名存入缓存
+    if not img_b64:
+        return {"status": "error", "message": "No image data"}
+
+    try:
+        # 1. 解码与识别
+        img_data = base64.b64decode(img_b64)
+
+        # --- 智能切图核心调用 ---
+        # 注意：这里的 img_data 是 Android 传来的 400x400 或 600x600 的局部图
+        # 这里的 click_x/y 应该是相对于这张局部图的坐标
+        start_time = time.time()
+        smart_img_mat = get_smart_crop(img_data, click_x, click_y)
+
+        # 将 OpenCV 的 Mat 转回 PIL Image 给 Manga-OCR 使用
+        smart_img_rgb = cv2.cvtColor(smart_img_mat, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(smart_img_rgb)
+        duration = time.time() - start_time
+        print(f"图片截取 响应耗时: {duration:.2f}s")
+
+        # 后续 OCR 逻辑不变
+        start_time = time.time()
+        text = mocr(image)
+        last_ocr_text = text  # 存入缓存
+
+        words = analyze_text(text)
+        duration = time.time() - start_time
+        print(f"文本处理 响应耗时: {duration:.2f}s")
+
+        # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
+        return {
+            "status": "success",
+            "text": text,
+            "words": words,
+            "translation": ""  # 初始为空
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/get_translation")
+async def get_translation():
+    global last_ocr_text, last_manga_name  # <--- 声明读取这两个全局变量
+    if not last_ocr_text:
+        return {"translation": "未检测到待翻译文字"}
+
+    # 调用时传入缓存的漫画名
+    translation = get_ai_translation(last_ocr_text, last_manga_name)
+    return {"translation": translation}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=12233)
