@@ -21,7 +21,7 @@ class MangaCropEngine:
 
         # === Mode 0: 客户端手动圈选模式 ===
         if cx == 0 and cy == 0:
-            print("🚀 [Mode 0] Manual/Bypass Mode triggered.")
+            print("🚀 [Mode 0] 直接处理手动圈选的截图")
             # 同样调用调试保存函数，标记为 mode0
             return self._save_debug_and_return(img, 0, 0, w, h, 0, 0, "mode0_manual")
 
@@ -53,7 +53,7 @@ class MangaCropEngine:
 
         # === Mode 1: 几何气泡模式 ===
         if is_valid_bubble:
-            print(f"🎯 [Mode 1] Shape Validated Bubble at ({cx}, {cy})")
+            print(f"🎯 [Mode 1] 直接命中气泡框，坐标： ({cx}, {cy})")
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
             closed_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_CLOSE, kernel)
             cnts_closed, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -65,13 +65,13 @@ class MangaCropEngine:
                                                    "mode1_bubble")
 
         # === Mode 2: EasyOCR 膨胀聚类模式 ===
-        print(f"🧠 [Mode 2] Switching to Expansion Clustering at ({cx}, {cy})")
+        print(f"🧠 [Mode 2] 判定为无气泡框，坐标： ({cx}, {cy})")
         easy_res = self._try_easyocr_logic(img, gray, cx, cy)
         if easy_res is not None:
             return easy_res
 
         # === Mode 3: 动态比例保底 ===
-        print(f"🩹 [Mode 3] Fallback to Proportional at ({cx}, {cy})")
+        print(f"🩹 [Mode 3] 触发保底截图，坐标： ({cx}, {cy})")
         fw, fh = int(w * 0.6), int(h * 0.8)
         x1 = max(0, min(w - fw, cx - fw // 2))
         y1 = max(0, min(h - fh, cy - fh // 2))
@@ -104,9 +104,12 @@ class MangaCropEngine:
 
         # 判定逻辑：
         # - Solidity < 0.7: 形状极度不规则（像蜘蛛网），判定为漏气
-        # - Extent > 0.95: 极度方正且占地大，可能是漫画格子的边框而非气泡
-        if solidity < 0.75:
-            print(f"🛡️ [Leak Check] Low solidity ({solidity:.2f}). Rejected.")
+        # - Extent > 0.9: 极度方正且占地大，可能是漫画格子的边框而非气泡
+        if solidity < 0.7:
+            print(f"🛡️ 检测到气泡形状不规则，予以否决 ({solidity:.2f})")
+            return False
+        if extent > 0.9:
+            print(f"🛡️ 检测到气泡面积过大，予以否决 ({extent:.2f})")
             return False
 
         # 可选：椭圆拟合检查 (对于非常标准的椭圆气泡)
@@ -201,16 +204,23 @@ class MangaCropEngine:
                 b = box_data[idx]['orig']
                 cv2.rectangle(vis_img, (b[0], b[2]), (b[1], b[3]), (0, 255, 0), 1)
 
-            # 命中判定 (40px 容错)
-            if (gx1 - 40) <= cx <= (gx2 + 40) and (gy1 - 40) <= cy <= (gy2 + 40):
-                print(f"✅ [Mode 2] Hit cluster with {len(cluster_indices)} boxes")
-                cv2.rectangle(vis_img, (gx1, gy1), (gx2, gy2), (0, 0, 255), 4)
+                # 命中判定 (40px 容错)
+                if (gx1 - 40) <= cx <= (gx2 + 40) and (gy1 - 40) <= cy <= (gy2 + 40):
+                    print(f"✅ [Mode 2] 匹配到文本范围，内含 {len(cluster_indices)} 个单体")
+                    cv2.rectangle(vis_img, (gx1, gy1), (gx2, gy2), (0, 0, 255), 4)
 
-                pad_w = int((gx2 - gx1) * 0.1) + 15
-                pad_h = int((gy2 - gy1) * 0.1) + 15
-                x1, y1 = max(0, gx1 - pad_w), max(0, gy1 - pad_h)
-                x2, y2 = min(img.shape[1], gx2 + pad_w), min(img.shape[0], gy2 + pad_h)
-                final_res = img[y1:y2, x1:x2]
+                    # --- 修改处：扩展至 1.1 倍动态尺寸 ---
+                    curr_gw = gx2 - gx1
+                    curr_gh = gy2 - gy1
+
+                    # 总长宽补偿
+                    pad_w = int(curr_gw * 0.05) + 10  # 宽度补偿 + 10px 基础边距
+                    pad_h = int(curr_gh * 0.05) + 10  # 高度补偿 + 10px 基础边距
+
+                    x1, y1 = max(0, gx1 - pad_w), max(0, gy1 - pad_h)
+                    x2, y2 = min(img.shape[1], gx2 + pad_w), min(img.shape[0], gy2 + pad_h)
+
+                    final_res = img[y1:y2, x1:x2]
                 # 这里不break，为了画完所有的调试框，但会保留命中的结果
 
         cv2.circle(vis_img, (cx, cy), 6, (255, 0, 255), -1)
