@@ -42,7 +42,7 @@ print("Loading Manga-OCR model...")
 mocr = MangaOcr()
 
 # 初始化 Janome 分词器 (本地运行，极快)
-print("Initializing Tokenizer...")
+#print("Initializing Tokenizer...")
 tokenizer = Tokenizer()
 
 # 初始化检测器 (只开启检测功能，不开启识别，速度极快)

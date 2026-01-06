@@ -1,6 +1,5 @@
 import cv2
 import numpy as np
-import os
 
 
 class MangaCropEngine:
@@ -20,7 +19,11 @@ class MangaCropEngine:
         cx = int(click_x_rel * w) if 0 < click_x_rel < 1 else int(click_x_rel)
         cy = int(click_y_rel * h) if 0 < click_y_rel < 1 else int(click_y_rel)
 
-        if cx == 0 and cy == 0: return img
+        # === Mode 0: 客户端手动圈选模式 ===
+        if cx == 0 and cy == 0:
+            print("🚀 [Mode 0] Manual/Bypass Mode triggered.")
+            # 同样调用调试保存函数，标记为 mode0
+            return self._save_debug_and_return(img, 0, 0, w, h, 0, 0, "mode0_manual")
 
         # --- 1. 自动纠偏 ---
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
