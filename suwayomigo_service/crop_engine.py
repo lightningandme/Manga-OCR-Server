@@ -1,176 +1,254 @@
 import cv2
 import numpy as np
-import time
+import os
 
 
 class MangaCropEngine:
-    def __init__(self, easyocr_reader):
-        """
-        :param easyocr_reader: 外部传入的 easyocr.Reader 实例
-        """
+    def __init__(self, easyocr_reader=None):
         self.reader = easyocr_reader
 
-    def get_smart_crop(self, img_cv2, click_x, click_y):
-        if img_cv2 is None:
-            return None
-
-        h_img, w_img = img_cv2.shape[:2]
-
-        # --- 【模式 0】客户端精准圈选模式 ---
-        if click_x == 0 and click_y == 0:
-            print("🚀 [Mode 0] Client Manual Mode. Returning full image.")
-            return img_cv2
-
-        # --- 【模式 1】气泡框识别模式 (快速 OpenCV 方案) ---
-        bubble_crop = self._try_bubble_mode(img_cv2, click_x, click_y)
-        if bubble_crop is not None:
-            print("🎯 [Mode 1] Bubble Contour Success.")
-            return bubble_crop
-
-        # --- 【模式 2】Smart OCR 聚合模式 (EasyOCR + 物理墙) ---
-        print("🧠 [Mode 1 Failed] Switching to Mode 2: EasyOCR Aggregation...")
-        semantic_crop = self._try_easyocr_aggregation(img_cv2, click_x, click_y)
-        if semantic_crop is not None:
-            print("✅ [Mode 2] EasyOCR Aggregation Success.")
-            return semantic_crop
-
-        # --- 【模式 3】动态比例裁切保底 ---
-        print("🩹 [Mode 2 Failed] Switching to Mode 3: Dynamic Fallback.")
-        return self._fallback_dynamic_crop(img_cv2, click_x, click_y)
-
-    # ================= 策略实现内部函数 =================
-
-    def _try_bubble_mode(self, img, x, y):
-        """ 模式 1：基于 FloodFill 的气泡查找 """
+    def get_smart_crop(self, image_bytes, click_x_rel, click_y_rel):
+        nparr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: return None
         h, w = img.shape[:2]
+
+        # 1. 坐标转换与【自动纠偏】
+        cx, cy = int(click_x_rel), int(click_y_rel)
+        if cx == 0 and cy == 0: return img
+
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        search_radius = 20
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        min_y, max_y = max(0, cy - search_radius), min(h, cy + search_radius)
+        min_x, max_x = max(0, cx - search_radius), min(w, cx + search_radius)
+        sub = blurred[min_y:max_y, min_x:max_x]
+        if sub.size > 0:
+            _, max_val, _, max_loc = cv2.minMaxLoc(sub)
+            if max_val > 180:
+                cx, cy = min_x + max_loc[0], min_y + max_loc[1]
 
-        # 建立 Mask
-        mask = np.zeros((h + 2, w + 2), np.uint8)
-        # 尝试 FloodFill，设定较低的阈值以适应漫画纸张背景
-        # loDiff/upDiff=20 是为了适应轻微的背景网点
-        temp_img = img.copy()
-        cv2.floodFill(temp_img, mask, (int(x), int(y)), (255, 255, 255), (20, 20, 20), (20, 20, 20),
-                      8 | cv2.FLOODFILL_MASK_ONLY)
+        # --- 2. 魔法棒探测与漏气判定 ---
+        ff_mask = np.zeros((h + 2, w + 2), np.uint8)
+        flood_filled = gray.copy()
+        cv2.floodFill(flood_filled, ff_mask, (cx, cy), 255, (18,), (18,), cv2.FLOODFILL_FIXED_RANGE)
+        bubble_mask = ff_mask[1:-1, 1:-1] * 255
+        cnts, _ = cv2.findContours(bubble_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # 提取填充区域
-        actual_mask = mask[1:-1, 1:-1]
-        contours, _ = cv2.findContours(actual_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        is_leaking = True
+        if cnts:
+            c = max(cnts, key=cv2.contourArea)
+            bx, by, bw, bh = cv2.boundingRect(c)
+            area = cv2.contourArea(c)
+            solidity = area / float(bw * bh) if (bw * bh) > 0 else 0
+            if not (bw > w * 0.8 or bh > h * 0.8 or area > (w * h * 0.6) or (solidity > 0.9 and area > (w * h * 0.3))):
+                is_leaking = False
 
-        if contours:
-            cnt = max(contours, key=cv2.contourArea)
-            bx, by, bw, bh = cv2.boundingRect(cnt)
+        # --- 3. 逻辑分流 (修复返回链条) ---
+        if not is_leaking:
+            print("--- Mode: Bubble Capture ---")
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+            bubble_mask = cv2.morphologyEx(bubble_mask, cv2.MORPH_CLOSE, kernel)
+            cnts, _ = cv2.findContours(bubble_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if cnts:
+                c = max(cnts, key=cv2.contourArea)
+                x, y, rw, rh = cv2.boundingRect(c)
+                # 直接通过调试函数返回，确保不再向下执行
+                return self._save_debug_and_return(img, x - 10, y - 10, x + rw + 10, y + rh + 10, cx, cy, "mode1")
 
-            # 校验：气泡不能太小（排除杂点），也不能太大（防止充满全图）
-            if bw > 30 and bh > 30 and bw < w * 0.9 and bh < h * 0.9:
-                # 增加 5% 的 Padding
-                p_w, p_h = int(bw * 0.05), int(bh * 0.05)
-                x1, y1 = max(0, bx - p_w), max(0, by - p_h)
-                x2, y2 = min(w, bx + bw + p_w), min(h, by + bh + p_h)
+        # 如果漏气或 Mode 1 失败，进入聚合模式
+        print("--- Mode: Semantic/Flow Aggregation ---")
+        easy_res = self._try_easyocr_logic(img, gray, cx, cy)
+        if easy_res is not None:
+            return easy_res
 
-                # 调试图输出
-                debug_vis = img.copy()
-                cv2.rectangle(debug_vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.imwrite("debug_mode1_bubble.png", debug_vis)
+        # 最后的兜底：定向流向聚合 或 动态比例保底
+        return self._original_flow_aggregation(img, gray, cx, cy)
 
-                return img[y1:y2, x1:x2]
-        return None
-
-    def _try_easyocr_aggregation(self, img, x, y):
-        """ 模式 2：EasyOCR 语义聚合 + 物理墙探测 """
+    def _try_easyocr_logic(self, img, gray, cx, cy):
+        if not self.reader: return None
         h_img, w_img = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)  # 预计算物理墙
+        edges = cv2.Canny(gray, 70, 200)  # 调高阈值，减少背景噪音干扰
 
-        # 1. 检测原始火柴盒
-        horizontal_list, _ = self.reader.detect(img, text_threshold=0.5)
+        horizontal_list, _ = self.reader.detect(img, text_threshold=0.3)
         raw_boxes = horizontal_list[0] if horizontal_list else []
         if not raw_boxes: return None
 
-        # 2. 聚类
-        avg_h = np.mean([b[3] - b[2] for b in raw_boxes]) if raw_boxes else 30
+        # 格式标准化：确保是 [x1, x2, y1, y2]
+        formatted_boxes = []
+        for b in raw_boxes:
+            if len(b) == 4:  # [x1, x2, y1, y2]
+                formatted_boxes.append(b)
+            elif len(b) == 2 and len(b[0]) == 2:  # [[x,y],[x,y],[x,y],[x,y]]
+                xs = [p[0] for p in b]
+                ys = [p[1] for p in b]
+                formatted_boxes.append([min(xs), max(xs), min(ys), max(ys)])
+
+        avg_h = np.mean([b[3] - b[2] for b in formatted_boxes]) if formatted_boxes else 30
         grouped = []
-        used = [False] * len(raw_boxes)
+        used = [False] * len(formatted_boxes)
 
-        for i in range(len(raw_boxes)):
+        for i in range(len(formatted_boxes)):
             if used[i]: continue
-            cluster = [raw_boxes[i]]
+            cluster = [formatted_boxes[i]]
             used[i] = True
-
             found = True
             while found:
                 found = False
                 c_x1, c_x2 = min(b[0] for b in cluster), max(b[1] for b in cluster)
                 c_y1, c_y2 = min(b[2] for b in cluster), max(b[3] for b in cluster)
-
-                for j in range(len(raw_boxes)):
+                for j in range(len(formatted_boxes)):
                     if used[j]: continue
-                    bx1, bx2, by1, by2 = raw_boxes[j]
+                    bx1, bx2, by1, by2 = formatted_boxes[j]
                     dx = max(0, c_x1 - bx2, bx1 - c_x2)
                     dy = max(0, c_y1 - by2, by1 - c_y2)
 
-                    # 基础距离判定 + 物理墙探测
-                    if dy < avg_h * 1.2 and dx < avg_h * 0.4:
-                        p1 = (int((c_x1 + c_x2) / 2), int((c_y1 + c_y2) / 2))
-                        p2 = (int((bx1 + bx2) / 2), int((by1 + by2) / 2))
-                        if not self._is_blocked(edges, p1, p2):
-                            cluster.append(raw_boxes[j])
+                    if dy < avg_h * 1.5 and dx < avg_h * 0.8:  # 放宽聚合距离
+                        p_s = (int((c_x1 + c_x2) / 2), int((c_y1 + c_y2) / 2))
+                        p_e = (int((bx1 + bx2) / 2), int((by1 + by2) / 2))
+                        if not self._is_blocked(edges, p_s, p_e):
+                            cluster.append(formatted_boxes[j])
                             used[j] = True
                             found = True
 
-            grouped.append((min(b[0] for b in cluster), max(b[1] for b in cluster),
-                            min(b[2] for b in cluster), max(b[3] for b in cluster)))
+            grouped.append({'box': (min(b[0] for b in cluster), max(b[1] for b in cluster),
+                                    min(b[2] for b in cluster), max(b[3] for b in cluster))})
 
-        # 3. 匹配点击点
-        best_box = None
-        for box in grouped:
-            x1, x2, y1, y2 = map(int, box)
-            if (x1 - 15) <= x <= (x2 + 15) and (y1 - 15) <= y <= (y2 + 15):
-                best_box = (x1, x2, y1, y2)
-                break
-
-        if best_box:
-            x1, x2, y1, y2 = best_box
-            pw, ph = int((x2 - x1) * 0.1) + 10, int((y2 - y1) * 0.05) + 10
-            # 调试图
-            debug_vis = img.copy()
-            cv2.rectangle(debug_vis, (max(0, x1 - pw), max(0, y1 - ph)), (min(w_img, x2 + pw), min(h_img, y2 + ph)),
-                          (255, 0, 0), 2)
-            cv2.imwrite("debug_mode2_easyocr.png", debug_vis)
-            return img[max(0, y1 - ph):min(h_img, y2 + ph), max(0, x1 - pw):min(w_img, x2 + pw)]
-
+        for g in grouped:
+            x1, x2, y1, y2 = g['box']
+            # 将容错范围扩大到 40px，解决纠偏后的点击偏移
+            if (x1 - 40) <= cx <= (x2 + 40) and (y1 - 40) <= cy <= (y2 + 40):
+                pad_w, pad_h = int((x2 - x1) * 0.1) + 15, int((y2 - y1) * 0.1) + 15
+                return self._save_debug_and_return(img, x1 - pad_w, y1 - pad_h, x2 + pad_w, y2 + pad_h, cx, cy, "mode2")
         return None
 
     def _is_blocked(self, edges, p1, p2):
-        """ 物理墙探测辅助函数 """
-        num_samples = 15
+        num_samples = 20
         pts_x = np.linspace(p1[0], p2[0], num_samples).astype(int)
         pts_y = np.linspace(p1[1], p2[1], num_samples).astype(int)
         hits = 0
-        h, w = edges.shape
+        h_max, w_max = edges.shape[:2]
         for i in range(num_samples):
             px, py = pts_x[i], pts_y[i]
-            if 0 <= px < w and 0 <= py < h:
+            if 0 <= px < w_max and 0 <= py < h_max:
                 if edges[py, px] > 0: hits += 1
-                if hits >= 2: return True
-        return False
+        # 提高碰撞门槛：超过 25% 的采样点撞墙才认为是阻塞，防止网点干扰
+        return hits > (num_samples * 0.25)
 
-    def _fallback_dynamic_crop(self, img, x, y):
-        """ 模式 3：0.4W x 0.6H 动态比例裁剪 """
+    def _save_debug_and_return(self, img, x1, y1, x2, y2, ox, oy, suffix=""):
         h, w = img.shape[:2]
-        cw, ch = int(w * 0.4), int(h * 0.6)
+        x1, y1, x2, y2 = max(0, int(x1)), max(0, int(y1)), min(w, int(x2)), min(h, int(y2))
 
-        x1 = max(0, int(x - cw / 2))
-        y1 = max(0, int(y - ch / 2))
-        x2 = min(w, x1 + cw)
-        y2 = min(h, y1 + ch)
-
-        # 边界补全
-        if x2 == w: x1 = max(0, x2 - cw)
-        if y2 == h: y1 = max(0, y2 - ch)
-
-        debug_vis = img.copy()
-        cv2.rectangle(debug_vis, (x1, y1), (x2, y2), (0, 0, 255), 2)
-        cv2.imwrite("debug_mode3_fallback.png", debug_vis)
+        # 只有在返回有效区域时才保存调试图
+        debug_img = img.copy()
+        cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        cv2.circle(debug_img, (int(ox), int(oy)), 7, (255, 0, 0), -1)
+        cv2.putText(debug_img, f"Target: {suffix}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        cv2.imwrite(f"debug_result_{suffix}.png", debug_img)
 
         return img[y1:y2, x1:x2]
+
+    def _original_flow_aggregation(self, img, gray, cx, cy):
+        """
+        搬运并优化：定向流向聚合逻辑
+        该逻辑通过动态计算团块的长宽比来决定生长方向（竖排/横排/方块）
+        """
+        h, w = img.shape[:2]
+
+        # 1. 多特征融合：边缘 + 高光 + 局部对比度
+        edges = cv2.Canny(gray, 60, 180)
+        _, bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+        adaptive_mask = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                              cv2.THRESH_BINARY_INV, 15, 8)
+
+        combined_features = cv2.bitwise_or(cv2.bitwise_or(edges, bright_mask), adaptive_mask)
+
+        # 2. 定向形态学膨胀 (3, 30) 和 (30, 3)
+        kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 30))
+        kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (30, 3))
+        dilated = cv2.dilate(combined_features, kernel_v)
+        dilated = cv2.dilate(dilated, kernel_h)
+
+        # 保存中间调试图
+        cv2.imwrite("debug_radar_mask.png", dilated)
+
+        r_cnts, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        candidates = []
+        seed_idx = -1
+        for i, rc in enumerate(r_cnts):
+            rx, ry, rrw, rrh = cv2.boundingRect(rc)
+            if rrw > w * 0.95 or rrh > h * 0.95: continue  # 过滤边框
+            candidates.append((rx, ry, rrw, rrh))
+            if rx <= cx <= rx + rrw and ry <= cy <= ry + rrh:
+                seed_idx = len(candidates) - 1
+
+        if seed_idx != -1:
+            # --- 【核心逻辑】：动态生长聚合循环 ---
+            merged_indices = {seed_idx}
+            FLOW_GAP = 120  # 顺着文字流向的最大空隙
+            CROSS_GAP = 15  # 垂直流向的严苛限制
+            has_new_merge = True
+
+            while has_new_merge:
+                has_new_merge = False
+
+                # 计算当前团块的边界
+                current_rects = [candidates[i] for i in merged_indices]
+                min_x = min([r[0] for r in current_rects])
+                min_y = min([r[1] for r in current_rects])
+                max_x = max([r[0] + r[2] for r in current_rects])
+                max_y = max([r[1] + r[3] for r in current_rects])
+                curr_w = max_x - min_x
+                curr_h = max_y - min_y
+
+                # 动态判断流向
+                is_vertical = curr_h > curr_w * 1.1
+                is_horizontal = curr_w > curr_h * 1.1
+
+                for i in range(len(candidates)):
+                    if i in merged_indices: continue
+                    ox, oy, ow, oh = candidates[i]
+                    ox2, oy2 = ox + ow, oy + oh
+
+                    should_merge = False
+                    # 计算投影对齐度
+                    overlap_x = max(0, min(max_x, ox2) - max(min_x, ox))
+                    ratio_align_v = overlap_x / min(curr_w, ow) if min(curr_w, ow) > 0 else 0
+                    overlap_y = max(0, min(max_y, oy2) - max(min_y, oy))
+                    ratio_align_h = overlap_y / min(curr_h, oh) if min(curr_h, oh) > 0 else 0
+
+                    dist_x = max(0, max(min_x, ox) - min(max_x, ox2))
+                    dist_y = max(0, max(min_y, oy) - min(max_y, oy2))
+
+                    # 判定逻辑：竖排/横排/初始态
+                    if is_vertical:
+                        if (ratio_align_v > 0.5 and dist_y < FLOW_GAP) or (dist_x < CROSS_GAP and dist_y < CROSS_GAP):
+                            should_merge = True
+                    elif is_horizontal:
+                        if (ratio_align_h > 0.5 and dist_x < FLOW_GAP) or (dist_x < CROSS_GAP and dist_y < CROSS_GAP):
+                            should_merge = True
+                    else:
+                        # Ambiguous 状态：优先吸纳对齐度高的邻居
+                        if ratio_align_v > 0.6 and dist_y < FLOW_GAP:
+                            should_merge = True
+                        elif ratio_align_h > 0.6 and dist_x < FLOW_GAP:
+                            should_merge = True
+                        elif dist_x < 20 and dist_y < 20:
+                            should_merge = True
+
+                    if should_merge:
+                        merged_indices.add(i)
+                        has_new_merge = True
+                        break  # 更新边界后重新开始遍历
+
+            # 最终返回合并后的区域，额外给 20px padding
+            return self._save_debug_and_return(img, min_x - 20, min_y - 20, max_x + 20, max_y + 20, cx, cy)
+
+        # --- 策略 3: 终极动态比例保底 ---
+        print("🩹 [Mode 3] Proportional Fallback.")
+        fw, fh = int(w * 0.6), int(h * 0.8)
+        # 确保中心点对齐且不越界
+        x1 = max(0, min(w - fw, cx - fw // 2))
+        y1 = max(0, min(h - fh, cy - fh // 2))
+        return self._save_debug_and_return(img, x1, y1, x1 + fw, y1 + fh, cx, cy)
