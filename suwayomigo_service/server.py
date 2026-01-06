@@ -2,7 +2,6 @@ import base64
 import os
 import sys
 import cv2
-import numpy as np
 import uvicorn
 from PIL import Image
 from fastapi import FastAPI, Body
