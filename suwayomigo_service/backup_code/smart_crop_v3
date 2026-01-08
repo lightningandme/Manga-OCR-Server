@@ -1,0 +1,220 @@
+import base64
+import os
+import sys
+import cv2
+import uvicorn
+from PIL import Image
+from fastapi import FastAPI, Body
+from dotenv import load_dotenv
+
+# 关键：将项目根目录加入系统路径
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from manga_ocr import MangaOcr
+from janome.tokenizer import Tokenizer
+from crop_engine import MangaCropEngine
+import easyocr
+import torch
+import json
+
+from openai import OpenAI
+import time
+
+import warnings
+# 屏蔽掉来自 huggingface_hub 的 FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+
+# 加载当前目录下的 .env 文件
+load_dotenv()
+
+# 从环境变量中读取
+api_key = os.getenv("DEEPSEEK_API_KEY")
+base_url = os.getenv("DEEPSEEK_BASE_URL")
+# --- 配置 DeepSeek ---
+client = OpenAI(
+    api_key=api_key,
+    base_url=base_url
+)
+
+app = FastAPI()
+
+# 初始化 OCR 模型
+print("Loading Manga-OCR model...")
+mocr = MangaOcr()
+
+# 初始化 Janome 分词器 (本地运行，极快)
+#print("Initializing Tokenizer...")
+tokenizer = Tokenizer()
+
+# 初始化检测器 (只开启检测功能，不开启识别，速度极快)
+print("Initializing CRAFT Text Detector...")
+gpu_available = torch.cuda.is_available()
+reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available)
+crop_engine = MangaCropEngine(reader)
+
+
+def analyze_text(text: str):
+    """
+    对日语文本进行分词，并提取学习相关的元数据
+    """
+    results = []
+    # 运行分词
+    tokens = tokenizer.tokenize(text)
+
+    for token in tokens:
+        # pos 格式通常为: 名詞,一般,*,*
+        pos_details = token.part_of_speech.split(',')
+        main_pos = pos_details[0]  # 主词性
+
+        # 过滤掉标点符号和空白，只保留有意义的词汇
+        if main_pos in ['記号', '助詞', '助動詞'] and token.surface in [' ', '　', '。', '、','．','！','？','：']:
+            continue
+
+        results.append({
+            "s": token.surface,  # 表面形：漫画里显示的原文
+            "b": token.base_form,  # 原型：查词典用的原始形态
+            "p": main_pos,  # 词性：名词、动词、形容词等
+            "r": token.reading  # 读音：片假名读音 (可选)
+        })
+    return results
+
+
+def get_ai_translation(text: str, manga_name: str):
+    # 解析漫画名和集数
+    manga, episode = manga_name.rsplit(':', 1) if ':' in manga_name else ("日本漫画", "某一话")
+    if not text.strip():
+        return {"translation": "", "candidates": []}
+
+    try:
+        start_time = time.time()
+
+        # 定义 JSON 样例模板，作为 Prompt 的一部分
+        json_template = {
+            "translation": "中文译文",
+            "candidates": [
+                {
+                    "surface": "原文词汇",
+                    "lemma": "辞书形/原型",
+                    "reading": "假名注音",
+                    "definition": "简短释义",
+                    "type": "词汇/熟语/拟声词"
+                }
+            ]
+        }
+
+        # 构建针对学习设计的 System Prompt
+        system_content = (
+            f"你是一位精通日语教学的日本漫画翻译专家。你正在解析《{manga}》的{episode}中的台词。"
+            "下面是你的任务流程：\n"
+            "1. **校对并翻译**：修正OCR错误，给出最地道、符合角色身份的中文翻译。\n"
+            "2. **提取知识点**：从原文中提取0-3个核心词汇、熟语、谚语或拟声拟态词作为学习候选candidates。\n"
+            "3. 严格遵守以下 JSON 格式样例，不要输出任何多余文字：\n"
+            f"{json.dumps(json_template, ensure_ascii=False)}"
+
+        )
+
+        response = client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": text},
+            ],
+            # 启用 JSON Mode 确保 Android 端解析不报错
+            response_format={'type': 'json_object'},
+            stream=False,
+            temperature=0.3,
+            max_tokens = 500
+        )
+
+        res_content = response.choices[0].message.content.strip()
+        result = json.loads(res_content)
+
+        final_data = {
+            "translation": result.get("translation", ""),
+            "candidates": result.get("candidates", []),
+            "source": f"{manga} {episode}"
+        }
+
+        # 保存调试文件
+        with open("debug_ai_result.json", "w", encoding="utf-8") as f:
+            json.dump(final_data, f, indent=4, ensure_ascii=False)
+
+        print(f"✅ AI 解析完成，耗时: {time.time() - start_time:.2f}s")
+        return final_data
+
+    except Exception as e:
+        return {"translation": "解析失败", "candidates": [], "source": manga_name}
+
+
+# 缓存最近一次的 OCR 文本和漫画名
+last_ocr_text = ""
+last_manga_name = "General"
+@app.post("/ocr")
+async def perform_ocr(payload: dict = Body(...)):
+    global last_ocr_text, last_manga_name  # <--- 修改这里，加入 last_manga_name
+    last_ocr_text = ""  # 每次识别新图前先清空旧缓存
+    img_b64 = payload.get("image")
+    # 获取 Android 传来的点击坐标
+    click_x = payload.get("x", 0)
+    click_y = payload.get("y", 0)
+    manga_name = payload.get("mangaName", "General")
+
+    last_manga_name = manga_name  # <--- 核心修改：将本次漫画名存入缓存
+    if not img_b64:
+        return {"status": "error", "message": "No image data"}
+
+    try:
+        # 1. 解码与识别
+        img_data = base64.b64decode(img_b64)
+
+        # --- 智能切图核心调用 ---
+        # 注意：这里的 img_data 是 Android 传来的 400x400 或 600x600 的局部图
+        # 这里的 click_x/y 应该是相对于这张局部图的坐标
+        start_time = time.time()
+        smart_img_mat = crop_engine.get_smart_crop(img_data, click_x, click_y)
+
+        # 将 OpenCV 的 Mat 转回 PIL Image 给 Manga-OCR 使用
+        smart_img_rgb = cv2.cvtColor(smart_img_mat, cv2.COLOR_BGR2RGB)
+        cv2.imwrite("final_crop.png", smart_img_rgb)
+        image = Image.fromarray(smart_img_rgb)
+        duration = time.time() - start_time
+        print(f"图片截取 响应耗时: {duration:.2f}s")
+
+        # 后续 OCR 逻辑不变
+        start_time = time.time()
+        text = mocr(image)
+        last_ocr_text = text  # 存入缓存
+
+        words = analyze_text(text)
+        duration = time.time() - start_time
+        print(f"文本处理 响应耗时: {duration:.2f}s")
+
+        # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
+        return {
+            "status": "success",
+            "text": text,
+            "words": words,
+            "translation": ""  # 初始为空
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/get_translation")
+async def get_translation():
+    global last_ocr_text, last_manga_name
+    if not last_ocr_text:
+        return {"status": "error", "message": "未检测到待翻译文字"}
+
+    # 现在 result 是一个包含 translation 和 candidates 的 dict
+    result = get_ai_translation(last_ocr_text, last_manga_name)
+
+    # 直接返回给 Android 端
+    return {
+        "status": "success",
+        "data": result
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=12233)
