@@ -206,7 +206,6 @@ class MangaCropEngine:
 
                 # 命中判定 (40px 容错)
                 if (gx1 - 40) <= cx <= (gx2 + 40) and (gy1 - 40) <= cy <= (gy2 + 40):
-                    print(f"✅ [Mode 2] 匹配到文本范围，内含 {len(cluster_indices)} 个单体")
                     cv2.rectangle(vis_img, (gx1, gy1), (gx2, gy2), (0, 0, 255), 4)
 
                     # --- 修改处：扩展至 1.1 倍动态尺寸 ---
@@ -222,7 +221,7 @@ class MangaCropEngine:
 
                     final_res = img[y1:y2, x1:x2]
                 # 这里不break，为了画完所有的调试框，但会保留命中的结果
-
+        print(f"✅ [Mode 2] 匹配到文本范围，内含 {len(cluster_indices)} 个单体")
         cv2.circle(vis_img, (cx, cy), 6, (255, 0, 255), -1)
         cv2.imwrite("debug_mode2_easyocr.png", vis_img)
         return final_res
