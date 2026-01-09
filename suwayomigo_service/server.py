@@ -51,31 +51,55 @@ gpu_available = torch.cuda.is_available()
 reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available)
 crop_engine = MangaCropEngine(reader)
 
+# 从 dict_engine.py 文件中导入 dict_engine 实例
+try:
+    from dict_engine import dict_engine
+except ImportError:
+    print("❌ 无法导入 dict_engine，请确保 dict_engine.py 存在于当前目录")
+    dict_engine = None
+
 
 def analyze_text(text: str):
     """
-    对日语文本进行分词，并提取学习相关的元数据
+    对日语文本进行分词，并筛选出具有学习价值的词汇 (Filtering for learning value)
     """
     results = []
-    # 运行分词
+    # 运行分词 (Run tokenization)
     tokens = tokenizer.tokenize(text)
 
-    for token in tokens:
-        # pos 格式通常为: 名詞,一般,*,*
-        pos_details = token.part_of_speech.split(',')
-        main_pos = pos_details[0]  # 主词性
+    # 定义我们要保留的核心词性白名单
+    # 名词, 动词, 形容词, 副词, 连体词(如'この'), 感叹词(拟声拟态词)
+    ALLOWED_POS = ['名詞', '動詞', '形容詞', '副詞', '連体詞', '感動詞']
 
-        # 过滤掉标点符号和空白，只保留有意义的词汇
-        if main_pos in ['記号', '助詞', '助動詞'] and token.surface in [' ', '　', '。', '、','．','！','？','：']:
+    for token in tokens:
+        pos_details = token.part_of_speech.split(',')
+        if pos_details[0] not in ALLOWED_POS:
             continue
 
+        base_form = token.base_form
+        # 安全调用
+        dict_data = {"r": "", "p": "", "d": ""}
+        if dict_engine:
+            dict_data = dict_engine.lookup(base_form)
+
         results.append({
-            "s": token.surface,  # 表面形：漫画里显示的原文
-            "b": token.base_form,  # 原型：查词典用的原始形态
-            "p": main_pos,  # 词性：名词、动词、形容词等
-            "r": token.reading  # 读音：片假名读音 (可选)
+            "s": token.surface,
+            "b": base_form,
+            "p": pos_details[0],
+            # 优先使用 Yomichan 的精准读音
+            "r": dict_data["r"] if dict_data["r"] else token.reading,
+            "d": dict_data["d"]
         })
-    return results
+
+    # 去重处理：如果同一句话里同一个词出现多次，只保留一个原型
+    unique_results = []
+    seen_bases = set()
+    for item in results:
+        if item["b"] not in seen_bases:
+            unique_results.append(item)
+            seen_bases.add(item["b"])
+
+    return unique_results
 
 
 def get_ai_translation(text: str, manga_name: str):
