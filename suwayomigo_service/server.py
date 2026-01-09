@@ -19,6 +19,7 @@ import torch
 
 from openai import OpenAI
 import time
+from deep_translator import GoogleTranslator
 
 import warnings
 # 屏蔽掉来自 huggingface_hub 的 FutureWarning
@@ -31,11 +32,20 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 base_url = os.getenv("BASE_URL")
 your_model = os.getenv("YOUR_MODEL")
-# --- 配置 DeepSeek ---
-client = OpenAI(
-    api_key=api_key,
-    base_url=base_url
-)
+# --- 核心修改：增加 AI 可用性检测 ---
+is_ai_available = False
+client = None
+
+if api_key and base_url:
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        # 这里不进行实际请求，只检查配置是否存在
+        is_ai_available = True
+        print("✅ AI 配置加载成功")
+    except Exception as e:
+        print(f"⚠️ AI 初始化失败，将启用网络翻译模式: {e}")
+else:
+    print("ℹ️ 未检测到 API_KEY，已自动进入网络翻译模式（如果想体验更好的AI翻译，请根据.env.example进行配置）")
 
 app = FastAPI()
 
@@ -111,36 +121,57 @@ def get_ai_translation(text: str, manga_name: str):
     if not text.strip():
         return ""
 
+    # 1. 优先尝试 AI 翻译
+    if is_ai_available and client:
+        try:
+            start_time = time.time()
+            # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
+            # noinspection PyTypeChecker
+
+            # 按照你提供的 Prompt 模板构建 System Content
+            system_content = (
+                f"你是一位精通多门语言的日本漫画翻译专家，正在阅读《{manga}》的{episode}。 \n"
+                "你的任务是处理来自 OCR 识别的原文，并完成以下三步：\n"
+                "1. **文本校对**：判断识别结果中是否存在因笔画密集导致的错别字，请结合语境将其修正（例如将错误的形近字还原为正确的词汇）。\n"
+                "2. **逻辑断句**：判断因漫画排版导致的非正常连字，并进行逻辑断行或增加标点，还原角色真实的说话节奏。\n"
+                "3. **地道翻译**：基于修正后的原文，结合该作品在此阶段的剧情背景和角色身份进行翻译。\n\n"
+                "请翻译成地道、流畅的中文。直接返回译文。"
+            )
+
+            response = client.chat.completions.create(
+                model=your_model,
+                messages=[
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": text},
+                ],
+                stream=False,
+                timeout=5.0,
+                temperature=0.3,  # 降低随机性，让翻译更稳定
+                max_tokens=150  # 限制输出长度，减少传输耗时
+            )
+            duration = time.time() - start_time
+            print(f"AI翻译 响应耗时: {duration:.2f}s (正在看:《{manga}》的{episode})")
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            return f"翻译出错了: {str(e)}"
+    # 2. 如果 AI 失败或未配置，进入 Fallback
+    return get_fallback_translation(text)
+
+def get_fallback_translation(text: str):
+    """
+    网络翻译备份逻辑：多引擎重试
+    """
+
     try:
+        # 方案 A: 使用 Google 翻译 (通常最准)
+        # 如果在国内环境，可能需要配置 proxies
         start_time = time.time()
-        # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
-        # noinspection PyTypeChecker
-
-        # 按照你提供的 Prompt 模板构建 System Content
-        system_content = (
-            f"你是一位精通多门语言的日本漫画翻译专家，正在阅读《{manga}》的{episode}。 \n"
-            "你的任务是处理来自 OCR 识别的原文，并完成以下三步：\n"
-            "1. **文本校对**：判断识别结果中是否存在因笔画密集导致的错别字，请结合语境将其修正（例如将错误的形近字还原为正确的词汇）。\n"
-            "2. **逻辑断句**：判断因漫画排版导致的非正常连字，并进行逻辑断行或增加标点，还原角色真实的说话节奏。\n"
-            "3. **地道翻译**：基于修正后的原文，结合该作品在此阶段的剧情背景和角色身份进行翻译。\n\n"
-            "请翻译成地道、流畅的中文。直接返回译文。"
-        )
-
-        response = client.chat.completions.create(
-            model=your_model,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": text},
-            ],
-            stream=False,
-            temperature=0.3,  # 降低随机性，让翻译更稳定
-            max_tokens=150  # 限制输出长度，减少传输耗时
-        )
-        duration = time.time() - start_time
-        print(f"AI翻译 响应耗时: {duration:.2f}s (正在看:《{manga}》的{episode})")
-        return response.choices[0].message.content.strip()
+        result = GoogleTranslator(source='ja', target='zh-CN').translate(text)
+        print(f"🌐 网络翻译(Google)耗时: {time.time() - start_time:.2f}s")
+        return f"[Google翻译] {result}"
     except Exception as e:
-        return f"翻译出错了: {str(e)}"
+        print(f"⚠️ Google 翻译失败: {e}，给客户端跳出提示...")
+        return f"调用Google翻译失败，请检查网络环境，或推荐使用AI翻译（配置方法详见GitHub页面）"
 
 
 # 缓存最近一次的 OCR 文本和漫画名
