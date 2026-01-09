@@ -2,10 +2,11 @@
 
 This is a customized version of [manga-ocr](https://github.com/kha-white/manga-ocr).
 
-### New Features:
-- **FastAPI Server**: Added a backend server to handle Base64 image uploads and return OCR text.
-- **Android Integration**: Compatible with my custom 
-[SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) client.
+## 使用说明：
+- 功能：接收客户端请求，OCR识别日语文本，并返回中文翻译和词典数据
+- 本客户端需搭配漫画阅读器 [SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) 使用
+- 拷贝仓库代码，python3.10，根据requirements.txt安装依赖
+- 运行 suwayomigo_service 文件夹下的 server.py
 # Manga OCR
 
 Optical character recognition for Japanese text, with the main focus being Japanese manga.

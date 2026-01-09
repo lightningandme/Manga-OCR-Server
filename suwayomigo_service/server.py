@@ -28,8 +28,9 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hu
 load_dotenv()
 
 # 从环境变量中读取
-api_key = os.getenv("DEEPSEEK_API_KEY")
-base_url = os.getenv("DEEPSEEK_BASE_URL")
+api_key = os.getenv("API_KEY")
+base_url = os.getenv("BASE_URL")
+your_model = os.getenv("YOUR_MODEL")
 # --- 配置 DeepSeek ---
 client = OpenAI(
     api_key=api_key,
@@ -105,6 +106,8 @@ def analyze_text(text: str):
 
 def get_ai_translation(text: str, manga_name: str):
     manga, episode = manga_name.rsplit(':', 1) if ':' in manga_name else ("日本漫画","某一话")
+    global your_model
+
     if not text.strip():
         return ""
 
@@ -124,7 +127,7 @@ def get_ai_translation(text: str, manga_name: str):
         )
 
         response = client.chat.completions.create(
-            model="deepseek-chat",
+            model=your_model,
             messages=[
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": text},
