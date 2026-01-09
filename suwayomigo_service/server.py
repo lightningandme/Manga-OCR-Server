@@ -6,6 +6,7 @@ import uvicorn
 from PIL import Image
 from fastapi import FastAPI, Body
 from dotenv import load_dotenv
+import socket
 
 # 关键：将项目根目录加入系统路径
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -180,7 +181,7 @@ async def perform_ocr(payload: dict = Body(...)):
 
         words = analyze_text(text)
         duration = time.time() - start_time
-        print(f"文本处理 响应耗时: {duration:.2f}s \n[原文] -->  {text}")
+        print(f"文本处理 响应耗时: {duration:.2f}s")
 
         # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
         return {
@@ -201,9 +202,21 @@ async def get_translation():
 
     # 调用时传入缓存的漫画名
     translation = get_ai_translation(last_ocr_text, last_manga_name)
+    print(f"[原文] -->  {last_ocr_text}")
     print(f"[译文] -->  {translation}")
     return {"translation": translation}
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=12233)
+    # 获取本机IP地址
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80)) # 连接一个外部地址，不发送数据，只为获取本地IP
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception :
+        local_ip = "127.0.0.1" # 如果获取失败，则默认为本地回环地址
+
+    port = 12233
+    print(f"🆗 OCR服务器已启动，访问地址 -->  http://{local_ip}:{port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
