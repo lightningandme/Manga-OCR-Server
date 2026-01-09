@@ -37,19 +37,19 @@ client = OpenAI(
 
 app = FastAPI()
 
-# 初始化 OCR 模型
-print("Loading Manga-OCR model...")
-mocr = MangaOcr()
-
-# 初始化 Janome 分词器 (本地运行，极快)
-#print("Initializing Tokenizer...")
-tokenizer = Tokenizer()
-
 # 初始化检测器 (只开启检测功能，不开启识别，速度极快)
-print("Initializing CRAFT Text Detector...")
+print("初始化 easyocr 文本检测器...")
 gpu_available = torch.cuda.is_available()
 reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available)
 crop_engine = MangaCropEngine(reader)
+
+# 初始化 Janome 分词器 (本地运行，极快)
+print("初始化 janome 分词器...")
+tokenizer = Tokenizer()
+
+# 初始化 OCR 模型
+print("正在加载 Manga-OCR 模型...")
+mocr = MangaOcr()
 
 # 从 dict_engine.py 文件中导入 dict_engine 实例
 try:
@@ -133,7 +133,7 @@ def get_ai_translation(text: str, manga_name: str):
             max_tokens=150  # 限制输出长度，减少传输耗时
         )
         duration = time.time() - start_time
-        print(f"AI翻译 响应耗时: {duration:.2f}s (正在看: 《{manga}》的{episode})")
+        print(f"AI翻译 响应耗时: {duration:.2f}s (正在看:《{manga}》的{episode})")
         return response.choices[0].message.content.strip()
     except Exception as e:
         return f"翻译出错了: {str(e)}"
@@ -180,7 +180,7 @@ async def perform_ocr(payload: dict = Body(...)):
 
         words = analyze_text(text)
         duration = time.time() - start_time
-        print(f"文本处理 响应耗时: {duration:.2f}s")
+        print(f"文本处理 响应耗时: {duration:.2f}s \n[原文] -->  {text}")
 
         # 核心：这里不再调用 AI 翻译，直接返回，速度提升 200%
         return {
@@ -201,6 +201,7 @@ async def get_translation():
 
     # 调用时传入缓存的漫画名
     translation = get_ai_translation(last_ocr_text, last_manga_name)
+    print(f"[译文] -->  {translation}")
     return {"translation": translation}
 
 
