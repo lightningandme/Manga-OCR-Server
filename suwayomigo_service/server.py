@@ -4,7 +4,8 @@ import sys
 import cv2
 import uvicorn
 from PIL import Image
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
 import socket
 
@@ -32,6 +33,7 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 base_url = os.getenv("BASE_URL")
 your_model = os.getenv("YOUR_MODEL")
+ocr_secret_key = os.getenv("OCR_SECRET_KEY")
 # --- 核心修改：增加 AI 可用性检测 ---
 is_ai_available = False
 client = None
@@ -70,6 +72,20 @@ except ImportError:
     print("❌ 无法导入 dict_engine，请确保 dict_engine.py 存在于当前目录")
     dict_engine = None
 
+# 1. 定义 Header 名称，通常习惯用 X-API-Key
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+# 2. 校验函数 (Validation Function)
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    # 将从 Header 获取的 key 与你环境变量中的 key 比对
+    if api_key == ocr_secret_key:
+        return api_key
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key. Access Denied."
+        )
 
 def analyze_text(text: str):
     """
@@ -178,7 +194,7 @@ def get_fallback_translation(text: str):
 last_ocr_text = ""
 last_manga_name = "General"
 @app.post("/ocr")
-async def perform_ocr(payload: dict = Body(...)):
+async def perform_ocr(payload: dict = Body(...), token: str = Depends(verify_api_key) ):
     global last_ocr_text, last_manga_name  # <--- 修改这里，加入 last_manga_name
     last_ocr_text = ""  # 每次识别新图前先清空旧缓存
     img_b64 = payload.get("image")
@@ -229,7 +245,7 @@ async def perform_ocr(payload: dict = Body(...)):
 
 
 @app.get("/get_translation")
-async def get_translation():
+async def get_translation(token: str = Depends(verify_api_key)):
     global last_ocr_text, last_manga_name  # <--- 声明读取这两个全局变量
     if not last_ocr_text:
         return {"translation": "未检测到待翻译文字"}
