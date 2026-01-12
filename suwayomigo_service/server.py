@@ -192,6 +192,11 @@ def get_fallback_translation(text: str):
         return f"调用Google翻译失败，请检查网络环境，或推荐使用AI翻译（配置方法详见GitHub页面）"
 
 
+# 用户客户端验证连通性
+@app.get("/health")
+async def health_check(token: str = Depends(verify_api_key)):
+    return {"status": "ok"}
+
 # 缓存最近一次的 OCR 文本和漫画名
 last_ocr_text = ""
 last_manga_name = "General"
