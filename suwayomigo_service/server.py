@@ -1,3 +1,4 @@
+print("OCR服务器启动中...")
 import base64
 import os
 import sys
@@ -63,6 +64,7 @@ tokenizer = Tokenizer()
 
 # 初始化 OCR 模型
 print("正在加载 Manga-OCR 模型...")
+time.sleep(1)
 mocr = MangaOcr()
 
 # 从 dict_engine.py 文件中导入 dict_engine 实例
