@@ -23,7 +23,7 @@ class MangaCropEngine:
         if cx == 0 and cy == 0:
             print("🚀 [Mode 0] 直接处理手动圈选的截图")
             # 同样调用调试保存函数，标记为 mode0
-            return self._save_debug_and_return(img, 0, 0, w, h, 0, 0, "mode0_manual")
+            #return self._save_debug_and_return(img, 0, 0, w, h, 0, 0, "mode0_manual")
 
         # --- 1. 自动纠偏 ---
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -61,8 +61,7 @@ class MangaCropEngine:
             if cnts_closed:
                 c = max(cnts_closed, key=cv2.contourArea)
                 x, y, rw, rh = cv2.boundingRect(c)
-                return self._save_debug_and_return(img, x - 10, y - 10, x + rw + 10, y + rh + 10, cx, cy,
-                                                   "mode1_bubble")
+                #return self._save_debug_and_return(img, x - 10, y - 10, x + rw + 10, y + rh + 10, cx, cy,"mode1_bubble")
 
         # === Mode 2: EasyOCR 膨胀聚类模式 ===
         print(f"🧠 [Mode 2] 判定为无气泡框，坐标： ({cx}, {cy})")
@@ -75,7 +74,7 @@ class MangaCropEngine:
         fw, fh = int(w * 0.6), int(h * 0.8)
         x1 = max(0, min(w - fw, cx - fw // 2))
         y1 = max(0, min(h - fh, cy - fh // 2))
-        return self._save_debug_and_return(img, x1, y1, x1 + fw, y1 + fh, cx, cy, "mode3_fallback")
+        #return self._save_debug_and_return(img, x1, y1, x1 + fw, y1 + fh, cx, cy, "mode3_fallback")
 
     def _is_bubble_shape(self, contour, img_w, img_h):
         """
@@ -223,7 +222,7 @@ class MangaCropEngine:
                 # 这里不break，为了画完所有的调试框，但会保留命中的结果
         print(f"✅ [Mode 2] 匹配到文本范围，内含 {len(cluster_indices)} 个单体")
         cv2.circle(vis_img, (cx, cy), 6, (255, 0, 255), -1)
-        cv2.imwrite("debug_mode2_easyocr.png", vis_img)
+        #cv2.imwrite("debug_mode2_easyocr.png", vis_img)
         return final_res
 
     def _should_merge_clusters(self, cluster_a, cluster_b, box_data, edges):

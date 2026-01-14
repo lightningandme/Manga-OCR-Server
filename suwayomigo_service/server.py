@@ -192,6 +192,47 @@ def get_fallback_translation(text: str):
         return f"调用Google翻译失败，请检查网络环境，或推荐使用AI翻译（配置方法详见GitHub页面）"
 
 
+def prepare_for_mocr(img_mat):
+    """
+    针对 Manga-OCR 优化的轻量预处理 (Lightweight Preprocessing)
+    """
+    if img_mat is None or img_mat.size == 0:
+        return None
+
+    h, w = img_mat.shape[:2]
+
+    # --- 核心改进：引入宽度判定 (Incorporate width detection) ---
+    # 定义最小理想尺寸 (Minimum ideal dimension)
+    min_threshold = 128
+    target_dim = 256.0
+
+    # 只要高度或宽度任何一个太小，就进行等比例放大
+    if h < min_threshold or w < min_threshold:
+        # 计算缩放比例，取能让短边达到 target_dim 的那个比例
+        # 这样可以确保放大后的图片，最窄的地方也有足够的细节
+        scale = target_dim / min(h, w)
+
+        # 限制最大缩放倍数，防止图片被放大到无限大导致 OOM (Out of Memory)
+        scale = min(scale, 4.0)
+
+        img_mat = cv2.resize(img_mat, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+
+        # 轻度对比度增强与压低亮度 (让文字更黑)
+        # alpha=1.3 增加对比度, beta=-15 压低亮度让灰色背景变白/黑色字更深
+        img_mat = cv2.convertScaleAbs(img_mat, alpha=1.3, beta=-15)
+
+    # 2. 增加白色留白 (Padding)
+    # 核心优化：防止文字贴边导致的识别失败，同时让模型更容易聚焦
+    pad_h = int(img_mat.shape[0] * 0.10)  # 上下增加 10%
+    pad_w = int(img_mat.shape[1] * 0.10)  # 左右增加 10%
+
+    img_mat = cv2.copyMakeBorder(
+        img_mat, pad_h, pad_h, pad_w, pad_w,
+        cv2.BORDER_CONSTANT, value=[255, 255, 255]
+    )
+
+    return img_mat
+
 # 用户客户端验证连通性
 @app.get("/health")
 async def health_check(token: str = Depends(verify_api_key)):
@@ -219,14 +260,15 @@ async def perform_ocr(payload: dict = Body(...), token: str = Depends(verify_api
         img_data = base64.b64decode(img_b64)
 
         # --- 智能切图核心调用 ---
-        # 注意：这里的 img_data 是 Android 传来的 400x400 或 600x600 的局部图
         # 这里的 click_x/y 应该是相对于这张局部图的坐标
         start_time = time.time()
         smart_img_mat = crop_engine.get_smart_crop(img_data, click_x, click_y)
+        # 针对 Manga-OCR 的预处理优化 (Preprocessing Optimization)
+        optimized_mat = prepare_for_mocr(smart_img_mat)
 
         # 将 OpenCV 的 Mat 转回 PIL Image 给 Manga-OCR 使用
-        smart_img_rgb = cv2.cvtColor(smart_img_mat, cv2.COLOR_BGR2RGB)
-        cv2.imwrite("final_crop.png", smart_img_rgb)
+        smart_img_rgb = cv2.cvtColor(optimized_mat, cv2.COLOR_BGR2RGB)
+        #cv2.imwrite("final_crop.png", optimized_mat)
         image = Image.fromarray(smart_img_rgb)
         duration = time.time() - start_time
         print(f"图片截取 响应耗时: {duration:.2f}s")
