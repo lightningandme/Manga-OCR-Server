@@ -1,4 +1,10 @@
 ﻿# build_portable.ps1
+# 本文件用于一键生成整合包，进入包含 build_portable.ps1 和 suwayomigo_service 文件夹的根目录
+# 在文件夹空白处按住 Shift 键，同时点击 鼠标右键，选择 “在此处打开 PowerShell 窗口”，依次运行：
+# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
+# .\build_portable.ps1
+
+# 以下为脚本代码
 # 强制指定当前窗口的编码为 UTF-8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
