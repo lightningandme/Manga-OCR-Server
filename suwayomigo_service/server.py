@@ -10,8 +10,13 @@ from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
 import socket
 
-# 关键：将项目根目录加入系统路径
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# 1. 环境与路径初始化
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+# 离线化关键：指定模型存放位置
+os.environ["HF_HOME"] = os.path.join(current_dir, "huggingface")
 
 from manga_ocr import MangaOcr
 from janome.tokenizer import Tokenizer
@@ -26,6 +31,15 @@ from deep_translator import GoogleTranslator
 import warnings
 # 屏蔽掉来自 huggingface_hub 的 FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning, module="huggingface_hub")
+
+# 检查 GPU 是否可用 (Check GPU Availability)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"--- 运行环境检查 ---")
+print(f"检测到可用设备: {device.upper()}")
+if device == "cuda":
+    print(f"显卡型号: {torch.cuda.get_device_name(0)}")
+else:
+    print("提示: 未检测到 NVIDIA GPU 或 CUDA 驱动，将使用 CPU 运行（速度较慢）。")
 
 # 加载当前目录下的 .env 文件
 load_dotenv()
