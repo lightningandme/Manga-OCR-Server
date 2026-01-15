@@ -140,7 +140,7 @@ cython_debug/
 .idea/
 
 #我的调试文件
-suwayomigo_service/huggingface
+huggingface
 suwayomigo_service/*.png
 suwayomigo_service/*.json
 suwayomigo_service/for_dict/*.db

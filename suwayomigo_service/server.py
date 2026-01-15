@@ -9,14 +9,44 @@ from fastapi import FastAPI, Body, Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from dotenv import load_dotenv
 import socket
+from pathlib import Path
 
-# 1. 环境与路径初始化
-current_dir = os.path.dirname(os.path.abspath(__file__))
-if current_dir not in sys.path:
-    sys.path.insert(0, current_dir)
+# 1. 路径自适应初始化
+# 无论是在本地运行还是整合包运行，__file__ 总是指向 server.py 本身
+current_file_path = Path(__file__).resolve()
+# current_dir 是 suwayomigo_service 文件夹
+current_dir = current_file_path.parent
+# root_dir 是项目的根目录 (在整合包里是包含 python.exe 的目录)
+root_dir = current_dir.parent
 
-# 离线化关键：指定模型存放位置
-os.environ["HF_HOME"] = os.path.join(current_dir, "huggingface")
+# 将相关路径加入 sys.path，确保模块导入不会报错
+for p in [current_dir, root_dir]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+# 2. 离线化模型路径重定向
+# 强制让 Manga-OCR 去根目录下的 huggingface 文件夹找模型
+os.environ["HF_HOME"] = str(root_dir / "huggingface")
+
+# 3. 智能加载 .env 配置文件
+from dotenv import load_dotenv
+
+# 定义可能的 .env 搜索路径（优先级：本地文件夹 > 根目录）
+env_candidates = [
+    current_dir / ".env",  # 本地开发环境：.env 在源码文件夹里
+    root_dir / ".env",     # 整合包环境：.env 在根目录
+]
+
+env_loaded = False
+for env_path in env_candidates:
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"[*] 已加载配置文件: {env_path}")
+        env_loaded = True
+        break  # 找到第一个就停止
+
+if not env_loaded:
+    print("[!] 警告: 未找到任何 .env 配置文件，请检查配置。")
 
 from manga_ocr import MangaOcr
 from janome.tokenizer import Tokenizer
@@ -41,8 +71,7 @@ if device == "cuda":
 else:
     print("提示: 未检测到 NVIDIA GPU 或 CUDA 驱动，将使用 CPU 运行（速度较慢）。")
 
-# 加载当前目录下的 .env 文件
-load_dotenv()
+
 
 # 从环境变量中读取
 api_key = os.getenv("API_KEY")
