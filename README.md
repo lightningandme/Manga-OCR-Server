@@ -3,7 +3,7 @@
 
 ## 使用说明：
 - 功能：接收客户端请求，OCR识别日漫文本，并返回中文翻译和词典数据（支持AI翻译）
-- 本客户端需搭配漫画阅读器 [SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) 和漫画服务器 [Suwayomi-Server
+- 本软件需搭配漫画阅读器 [SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) 和漫画服务器 [Suwayomi-Server
 ](https://github.com/Suwayomi/Suwayomi-Server) 使用
 - 拷贝仓库代码，使用python3.10，根据requirements.txt安装依赖
 - 打开 suwayomigo_service 根目录
