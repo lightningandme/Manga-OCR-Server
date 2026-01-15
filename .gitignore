@@ -142,6 +142,8 @@ cython_debug/
 #我的调试文件
 huggingface
 MangaOCR_Portable_GPU
+*.7z
+*.tmp
 suwayomigo_service/*.png
 suwayomigo_service/*.json
 suwayomigo_service/for_dict/*.db
