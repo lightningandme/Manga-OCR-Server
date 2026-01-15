@@ -44,6 +44,6 @@ Write-Host "5. 生成启动脚本..." -ForegroundColor Cyan
 $bat = "@echo off`ntitle Manga-OCR Server`nset HF_HOME=%~dp0huggingface`n.\python.exe .\suwayomigo_service\server.py`npause"
 
 # 将文件名改为 Run_Server.bat
-$bat | Out-File -FilePath "$DIST_DIR\Run_Server.bat" -Encoding ascii
+$bat | Out-File -FilePath "$DIST_DIR\[Run_Server].bat" -Encoding ascii
 
 Write-Host "`n[Done] Please manually copy the 'huggingface' folder into $DIST_DIR" -ForegroundColor Green
