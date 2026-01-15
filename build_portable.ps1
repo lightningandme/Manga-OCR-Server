@@ -1,4 +1,7 @@
-# build_portable.ps1
+﻿# build_portable.ps1
+# 强制指定当前窗口的编码为 UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $PYTHON_VERSION = "3.10.11"
 $DIST_DIR = "MangaOCR_Portable_GPU"
 $PYTHON_ZIP = "python-$PYTHON_VERSION-embed-amd64.zip"
@@ -36,8 +39,11 @@ if (Test-Path $exampleEnv) {
     Write-Host "已根据模板生成根目录 .env" -ForegroundColor Green
 }
 
+# 5. 生成启动脚本 (使用英文文件名避免乱码)
 Write-Host "5. 生成启动脚本..." -ForegroundColor Cyan
 $bat = "@echo off`ntitle Manga-OCR Server`nset HF_HOME=%~dp0huggingface`n.\python.exe .\suwayomigo_service\server.py`npause"
-$bat | Out-File -FilePath "$DIST_DIR\开始运行.bat" -Encoding ascii
 
-Write-Host "`n[完成] 请手动将 huggingface 文件夹放入 $DIST_DIR" -ForegroundColor Green
+# 将文件名改为 Run_Server.bat
+$bat | Out-File -FilePath "$DIST_DIR\Run_Server.bat" -Encoding ascii
+
+Write-Host "`n[Done] Please manually copy the 'huggingface' folder into $DIST_DIR" -ForegroundColor Green
