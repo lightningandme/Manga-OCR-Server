@@ -3,10 +3,15 @@ import os
 
 
 class SQLiteDictEngine:
-    def __init__(self, db_path="manga_dict.db"):
-        self.db_path = db_path
-        if not os.path.exists(db_path):
-            print(f"⚠️ 数据库不存在: {db_path}，请先运行转换脚本")
+    def __init__(self, db_filename="manga_dict.db"):
+        # 1. 获取当前文件 (dict_engine.py) 的绝对目录
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # 2. 拼接数据库的绝对路径，确保无论在哪里启动都能找到它
+        self.db_path = os.path.join(current_dir, db_filename)
+
+        if not os.path.exists(self.db_path):
+            print(f"⚠️ 数据库不存在: {self.db_path}，请确认字典文件已放入源码文件夹。")
 
     def lookup(self, base_form):
         """
