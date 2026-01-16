@@ -3,6 +3,9 @@
 # 在文件夹空白处按住 Shift 键，同时点击 鼠标右键，选择 “在此处打开 PowerShell 窗口”，依次运行：
 # Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 # .\build_portable.ps1
+# 运行完成后手动拷贝 'huggingface' 'easyocr_models' 文件夹
+# 文件压缩打包建议：7z，极限压缩，LZMA2，字典128MB，固实压缩
+# 在 PowerShell 中获取校验码：Get-FileHash ./MangaOCR_Portable_GPU.7z
 
 # 以下为脚本代码
 # 强制指定当前窗口的编码为 UTF-8
@@ -45,31 +48,11 @@ if (Test-Path $exampleEnv) {
     Write-Host "已根据模板生成根目录 .env" -ForegroundColor Green
 }
 
-# 5. 生成启动脚本 (集成离线模式环境变量)
+# 5. 生成启动脚本 (使用英文文件名避免乱码)
+
 Write-Host "5. 生成启动脚本..." -ForegroundColor Cyan
-$bat = @"
-@echo off
-title Manga-OCR Server
 
-:: 切换到脚本所在目录，确保路径引用正确
-cd /d %~dp0
-
-:: 设置 Hugging Face 模型存储路径
-set HF_HOME=%~dp0huggingface
-
-:: 【核心】开启离线模式，防止启动时联网检查模型导致卡顿
-set HF_HUB_OFFLINE=1
-set TRANSFORMERS_OFFLINE=1
-
-echo ========================================
-echo       Manga-OCR 离线服务端启动中
-echo ========================================
-
-:: 运行服务器
-.\python.exe .\suwayomigo_service\server.py
-
-pause
-"@
+$bat = "@echo off`ntitle Manga-OCR Server`nset HF_HOME=%~dp0huggingface`nset HF_HUB_OFFLINE=1`n.\python.exe .\suwayomigo_service\server.py`npause"
 
 # 将文件名改为 Run_Server.bat
 $bat | Out-File -FilePath "$DIST_DIR\[Run_Server].bat" -Encoding ascii
