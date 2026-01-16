@@ -1,6 +1,6 @@
 # Manga OCR Server (for SuwayomiGO)
 
-## 🚀 快速开始 (离线整合包)
+## 🚀 快速开始
 
 对于不想配置环境的Windows用户，可以直接下载整合包：
 
@@ -11,7 +11,7 @@
 *注意：此版本包含完整 PyTorch 环境，解压后约 5.6GB，建议预留空间。*
 
 ## 📕 其他说明
-- 功能：接收客户端请求，OCR识别日漫文本，并返回中文翻译和词典数据（支持AI翻译）
+- 服务器功能：接收客户端请求，OCR识别日漫文本，并返回中文翻译和词典数据（支持AI翻译）
 - 本软件需搭配漫画阅读器 [SuwayomiGO](https://github.com/lightningandme/SuwayomiGO) 和漫画服务器 [Suwayomi-Server](https://github.com/Suwayomi/Suwayomi-Server) 使用
 - 拷贝仓库代码，使用python3.10，根据requirements.txt安装依赖
 - 打开 suwayomigo_service 根目录
