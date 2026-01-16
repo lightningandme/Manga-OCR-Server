@@ -52,4 +52,4 @@ $bat = "@echo off`ntitle Manga-OCR Server`nset HF_HOME=%~dp0huggingface`n.\pytho
 # 将文件名改为 Run_Server.bat
 $bat | Out-File -FilePath "$DIST_DIR\[Run_Server].bat" -Encoding ascii
 
-Write-Host "`n[Done] Please manually copy the 'huggingface' folder into $DIST_DIR" -ForegroundColor Green
+Write-Host "`n[完成] 请把文件夹 'huggingface' 'easyocr_models' 手动拷贝至 $DIST_DIR" -ForegroundColor Green

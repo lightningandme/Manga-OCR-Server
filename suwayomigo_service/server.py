@@ -27,6 +27,7 @@ for p in [current_dir, root_dir]:
 # 2. 离线化模型路径重定向
 # 强制让 Manga-OCR 去根目录下的 huggingface 文件夹找模型
 os.environ["HF_HOME"] = str(root_dir / "huggingface")
+easyocr_path = str(root_dir / "easyocr_models")
 
 # 3. 智能加载 .env 配置文件
 from dotenv import load_dotenv
@@ -98,7 +99,7 @@ app = FastAPI()
 # 初始化检测器 (只开启检测功能，不开启识别，速度极快)
 print("初始化 easyocr 文本检测器...")
 gpu_available = torch.cuda.is_available()
-reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available)
+reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available, model_storage_directory=easyocr_path, download_enabled=False)
 crop_engine = MangaCropEngine(reader)
 
 # 初始化 Janome 分词器 (本地运行，极快)
