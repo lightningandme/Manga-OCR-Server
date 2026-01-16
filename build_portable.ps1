@@ -45,9 +45,31 @@ if (Test-Path $exampleEnv) {
     Write-Host "已根据模板生成根目录 .env" -ForegroundColor Green
 }
 
-# 5. 生成启动脚本 (使用英文文件名避免乱码)
+# 5. 生成启动脚本 (集成离线模式环境变量)
 Write-Host "5. 生成启动脚本..." -ForegroundColor Cyan
-$bat = "@echo off`ntitle Manga-OCR Server`nset HF_HOME=%~dp0huggingface`n.\python.exe .\suwayomigo_service\server.py`npause"
+$bat = @"
+@echo off
+title Manga-OCR Server
+
+:: 切换到脚本所在目录，确保路径引用正确
+cd /d %~dp0
+
+:: 设置 Hugging Face 模型存储路径
+set HF_HOME=%~dp0huggingface
+
+:: 【核心】开启离线模式，防止启动时联网检查模型导致卡顿
+set HF_HUB_OFFLINE=1
+set TRANSFORMERS_OFFLINE=1
+
+echo ========================================
+echo       Manga-OCR 离线服务端启动中
+echo ========================================
+
+:: 运行服务器
+.\python.exe .\suwayomigo_service\server.py
+
+pause
+"@
 
 # 将文件名改为 Run_Server.bat
 $bat | Out-File -FilePath "$DIST_DIR\[Run_Server].bat" -Encoding ascii
