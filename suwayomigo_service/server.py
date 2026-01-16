@@ -99,7 +99,8 @@ app = FastAPI()
 # 初始化检测器 (只开启检测功能，不开启识别，速度极快)
 print("初始化 easyocr 文本检测器...")
 gpu_available = torch.cuda.is_available()
-reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available, model_storage_directory=easyocr_path, download_enabled=False)
+models_exist = os.path.exists(easyocr_path) and len(os.listdir(easyocr_path)) > 0
+reader = easyocr.Reader(['ja', 'en'], gpu=gpu_available, model_storage_directory=easyocr_path, download_enabled=not models_exist)
 crop_engine = MangaCropEngine(reader)
 
 # 初始化 Janome 分词器 (本地运行，极快)
