@@ -27,7 +27,7 @@ STORAGE_DIR.mkdir(exist_ok=True)
 
 # 指向你的模型路径 (mokuro 的参数 --pretrained_model_name_or_path 可以直接用这个)
 # 通常 manga-ocr 的模型文件夹在 HF_HOME 下的特定位置，或者你直接指定具体目录
-MODEL_PATH = "kha-white/manga-ocr"
+# MODEL_PATH = "kha-white/manga-ocr"
 # MODEL_PATH = str(root_dir / "huggingface" / "hub" / "models--kha-white--manga-ocr" / "snapshots" / "...")
 # 注意：上面的 MODEL_PATH 建议根据你本地实际的文件夹名微调，
 # 或者直接传 "kha-white/manga-ocr"，只要 HF_HOME 设置对了，它会自动去里面找。
@@ -75,7 +75,7 @@ def run_mokuro(target_dir):
         "--disable_confirmation",
         "--disable_html",
         "--ignore_errors",
-        "--pretrained_model_name_or_path", MODEL_PATH
+        "--pretrained_model_name_or_path", os.environ["HF_HOME"]
     ]
     # 使用 subprocess 运行并捕获输出
     result = subprocess.run(cmd, capture_output=True, text=True)
