@@ -1,14 +1,40 @@
 import os
+import sys
 import json
 import requests
 import subprocess
+from pathlib import Path
 from requests.auth import HTTPBasicAuth
+
+# --- 1. 完全复用 server.py 的路径逻辑 ---
+current_file_path = Path(__file__).resolve()
+current_dir = current_file_path.parent
+root_dir = current_dir.parent
+
+# 确保模块导入路径一致
+for p in [current_dir, root_dir]:
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+# --- 2. 强制离线化环境变量 ---
+# 这一步至关重要！确保 mokuro 内部调用的 manga-ocr 也能找到模型
+os.environ["HF_HOME"] = str(root_dir / "huggingface")
+
+# --- 3. 配置参数 ---
+# 建议将缓存目录放在 root_dir 下，方便管理
+STORAGE_DIR = root_dir / "manga_cache"
+STORAGE_DIR.mkdir(exist_ok=True)
+
+# 指向你的模型路径 (mokuro 的参数 --pretrained_model_name_or_path 可以直接用这个)
+# 通常 manga-ocr 的模型文件夹在 HF_HOME 下的特定位置，或者你直接指定具体目录
+MODEL_PATH = "kha-white/manga-ocr"
+# MODEL_PATH = str(root_dir / "huggingface" / "hub" / "models--kha-white--manga-ocr" / "snapshots" / "...")
+# 注意：上面的 MODEL_PATH 建议根据你本地实际的文件夹名微调，
+# 或者直接传 "kha-white/manga-ocr"，只要 HF_HOME 设置对了，它会自动去里面找。
 
 # --- 配置区 ---
 BASE_URL = "http://10.0.0.2:2333/api/v1/manga/3557"
 AUTH = HTTPBasicAuth('guest', '123')
-STORAGE_DIR = "./manga_cache"  # 本地临时存放图片的目录
-MODEL_PATH = "./models/manga-ocr"  # 你的模型路径
 
 
 def download_chapter(manga_id, chapter_idx):
