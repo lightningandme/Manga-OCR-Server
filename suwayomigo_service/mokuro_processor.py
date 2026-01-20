@@ -31,10 +31,23 @@ STORAGE_DIR.mkdir(exist_ok=True)
 # MODEL_PATH = str(root_dir / "huggingface" / "hub" / "models--kha-white--manga-ocr" / "snapshots" / "...")
 # 注意：上面的 MODEL_PATH 建议根据你本地实际的文件夹名微调，
 # 或者直接传 "kha-white/manga-ocr"，只要 HF_HOME 设置对了，它会自动去里面找。
+def get_real_model_path(hf_home_dir):
+    """自动定位 snapshots 下的具体模型路径"""
+    base_path = Path(hf_home_dir) / "hub/models--kha-white--manga-ocr-base/snapshots"
+    if not base_path.exists():
+        return None
+
+    # 获取 snapshots 下的所有文件夹（通常只有一个长字符串命名的文件夹）
+    snapshots = [d for d in base_path.iterdir() if d.is_dir()]
+    if not snapshots:
+        return None
+
+    # 返回最新的一个快照路径
+    return str(snapshots[0])
 
 # --- 配置区 ---
-BASE_URL = "http://192.168.137.1:4567/api/v1/manga/49"
-#BASE_URL = "http://10.0.0.2:2333/api/v1/manga/3557"
+#BASE_URL = "http://192.168.137.1:4567/api/v1/manga/49"
+BASE_URL = "http://10.0.0.2:2333/api/v1/manga/3557"
 AUTH = HTTPBasicAuth('guest', '123')
 
 
@@ -68,25 +81,35 @@ def download_chapter(manga_id, chapter_idx):
 
 
 def run_mokuro(target_dir):
-    """带参数运行 mokuro"""
     print(f"正在为 {target_dir} 生成 OCR 数据...")
+
+    # 核心：获取绝对物理路径
+    real_path = get_real_model_path(os.environ["HF_HOME"])
+
+    if not real_path:
+        print("错误：在 HF_HOME 中未找到离线模型，请检查路径。")
+        return
+
+    print(f"检测到物理模型路径: {real_path}")
+
     cmd = [
         sys.executable, "-m", "mokuro",
-        target_dir,
+        str(target_dir),
         "--disable_confirmation",
         "--disable_html",
         "--ignore_errors",
-        "--pretrained_model_name_or_path", os.environ["HF_HOME"]
+        "--pretrained_model_name_or_path", real_path  # 传入绝对路径
     ]
-    # 打印一下实际执行的命令，方便调试
-    print(f"执行命令: {' '.join(cmd)}")
-    # 使用 subprocess 运行并捕获输出
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-    if result.returncode == 0:
+
+    # 建议加上 env 参数，确保环境变量 100% 传递给子进程
+    current_env = os.environ.copy()
+
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=current_env)
+
+    if result.returncode == 0 and "ERROR" not in result.stderr:
         print("Mokuro 处理完成。")
     else:
-        # 这里把错误信息打印出来，看看是不是模型路径或其他问题
-        print(f"Mokuro 运行失败，错误详情:\n{result.stderr}")
+        print(f"Mokuro 运行失败。错误详情:\n{result.stderr}")
 
 
 def extract_script(target_dir):
