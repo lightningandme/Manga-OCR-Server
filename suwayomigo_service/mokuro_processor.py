@@ -33,7 +33,8 @@ STORAGE_DIR.mkdir(exist_ok=True)
 # 或者直接传 "kha-white/manga-ocr"，只要 HF_HOME 设置对了，它会自动去里面找。
 
 # --- 配置区 ---
-BASE_URL = "http://10.0.0.2:2333/api/v1/manga/3557"
+BASE_URL = "http://192.168.137.1:4567/api/v1/manga/49"
+#BASE_URL = "http://10.0.0.2:2333/api/v1/manga/3557"
 AUTH = HTTPBasicAuth('guest', '123')
 
 
@@ -114,7 +115,7 @@ def main():
 
     while True:
         # 1. 下载图片
-        chapter_path = download_chapter(3557, current_chapter)
+        chapter_path = download_chapter(49, current_chapter)
 
         if not chapter_path:
             print("所有章节处理完毕或无法获取新章节。")
