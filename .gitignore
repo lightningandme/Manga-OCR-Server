@@ -148,3 +148,4 @@ MangaOCR_Portable_GPU
 suwayomigo_service/*.png
 suwayomigo_service/*.json
 suwayomigo_service/for_dict/*.db
+manga_cache
