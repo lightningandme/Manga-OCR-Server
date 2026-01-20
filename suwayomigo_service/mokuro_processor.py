@@ -71,19 +71,22 @@ def run_mokuro(target_dir):
     """带参数运行 mokuro"""
     print(f"正在为 {target_dir} 生成 OCR 数据...")
     cmd = [
-        "python", "-m", "mokuro",
+        sys.executable, "-m", "mokuro",
         target_dir,
         "--disable_confirmation",
         "--disable_html",
         "--ignore_errors",
         "--pretrained_model_name_or_path", os.environ["HF_HOME"]
     ]
+    # 打印一下实际执行的命令，方便调试
+    print(f"执行命令: {' '.join(cmd)}")
     # 使用 subprocess 运行并捕获输出
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.return_code == 0:
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
+    if result.returncode == 0:
         print("Mokuro 处理完成。")
     else:
-        print(f"Mokuro 运行失败: {result.stderr}")
+        # 这里把错误信息打印出来，看看是不是模型路径或其他问题
+        print(f"Mokuro 运行失败，错误详情:\n{result.stderr}")
 
 
 def extract_script(target_dir):
