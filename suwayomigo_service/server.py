@@ -313,7 +313,7 @@ async def perform_ocr(payload: dict = Body(...), token: str = Depends(verify_api
 
         # 将 OpenCV 的 Mat 转回 PIL Image 给 Manga-OCR 使用
         smart_img_rgb = cv2.cvtColor(optimized_mat, cv2.COLOR_BGR2RGB)
-        #cv2.imwrite("final_crop.png", optimized_mat)
+        cv2.imwrite("final_crop.png", optimized_mat)
         image = Image.fromarray(smart_img_rgb)
         duration = time.time() - start_time
         print(f"图片截取 响应耗时: {duration:.2f}s")
