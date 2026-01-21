@@ -94,11 +94,10 @@ def run_mokuro(target_dir):
 
     cmd = [
         sys.executable, "-m", "mokuro",
-        str(target_dir),
         "--disable_confirmation",
-        "--disable_html",
         "--ignore_errors",
-        "--pretrained_model_name_or_path", real_path  # 传入绝对路径
+        "--pretrained_model_name_or_path", real_path,  # 传入绝对路径
+        str(target_dir)
     ]
 
     # 建议加上 env 参数，确保环境变量 100% 传递给子进程
@@ -113,26 +112,44 @@ def run_mokuro(target_dir):
 
 
 def extract_script(target_dir):
-    """从生成的 .mokuro 文件中提取纯台本"""
-    # mokuro 通常在目录下生成一个与目录名相同的 .mokuro 文件
-    dirname = os.path.basename(target_dir)
-    mokuro_file = os.path.join(STORAGE_DIR, f"{dirname}.mokuro")
+    target_path = Path(target_dir)
+    # 获取同级的 .mokuro 文件
+    mokuro_file = target_path.with_suffix('.mokuro')
 
-    if not os.path.exists(mokuro_file):
+    print(f"正在分析数据文件: {mokuro_file}")
+
+    if not mokuro_file.exists():
         print(f"未找到数据文件: {mokuro_file}")
         return
 
-    with open(mokuro_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+    try:
+        with open(mokuro_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
 
-    script_path = os.path.join(target_dir, "script.txt")
-    with open(script_path, 'w', encoding='utf-8') as f_out:
-        for i, page in enumerate(data['pages']):
-            f_out.write(f"\n--- 第 {i} 页 ---\n")
-            for block in page['blocks']:
-                f_out.write(f"{block['text']}\n")
+        script_path = target_path / "script.txt"
+        with open(script_path, 'w', encoding='utf-8') as f_out:
+            # 写入漫画标题背景信息
+            f_out.write(f"作品名: {data.get('title', '未知')}\n")
+            f_out.write(f"章节: {data.get('volume', '未知')}\n")
+            f_out.write("=" * 30 + "\n")
 
-    print(f"台本提取成功: {script_path}")
+            for i, page in enumerate(data.get('pages', [])):
+                img_name = page.get('img_path', f'Page {i}')
+                f_out.write(f"\n[ 第 {i + 1} 页 ({img_name}) ]\n")
+
+                # 遍历每一个气泡块
+                for block in page.get('blocks', []):
+                    # 获取 lines 列表并合并
+                    lines = block.get('lines', [])
+                    if lines:
+                        # 漫画中一个 block 里的多行通常是一句话，直接拼接
+                        full_line = "".join(lines)
+                        f_out.write(f"{full_line}\n")
+
+        print(f"台本提取成功，保存在: {script_path}")
+
+    except Exception as e:
+        print(f"提取脚本时发生错误: {e}")
 
 
 # --- 主循环逻辑 ---
