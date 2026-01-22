@@ -90,9 +90,12 @@ def run_mokuro_on_dir(target_dir):
 
 
 def generate_script_file(target_dir, manga_id, chapter_idx):
-    """解析 .mokuro 生成 script.txt (保持不变)"""
+    """
+    解析 .mokuro 生成结构化脚本
+    格式: PageXXX,LineXXX,Width,Height,[box],Content
+    """
     target_path = Path(target_dir)
-    # 查找逻辑适配不同版本的 mokuro 输出位置
+    # 查找 .mokuro 文件
     mokuro_file = next(target_path.parent.glob(f"{target_path.name}.mokuro"), None) or \
                   next(target_path.glob("*.mokuro"), None)
 
@@ -104,16 +107,39 @@ def generate_script_file(target_dir, manga_id, chapter_idx):
             data = json.load(f)
 
         script_path = target_path / "script.txt"
+
         with open(script_path, 'w', encoding='utf-8') as f_out:
-            f_out.write(f"MangaID: {manga_id} | Chapter: {chapter_idx}\n" + "=" * 30 + "\n")
+            # 按照文件名排序页面
             pages = sorted(data.get('pages', []), key=lambda x: x.get('img_path', ''))
-            for page in pages:
-                f_out.write(f"\n[Page: {page.get('img_path', 'Unknown')}]\n")
-                for block in page.get('blocks', []):
-                    f_out.write("".join(block.get('lines', [])) + "\n")
-        print(f"剧本更新完毕: {script_path}")
+
+            for p_idx, page in enumerate(pages):
+                # 提取页面元数据
+                img_w = page.get('img_width', 0)
+                img_h = page.get('img_height', 0)
+                # 获取格式化的页码，如 001
+                page_num_str = f"{p_idx + 1:03d}"
+
+                blocks = page.get('blocks', [])
+                for b_idx, block in enumerate(blocks):
+                    # 获取格式化的行号，如 001
+                    line_num_str = f"{b_idx + 1:03d}"
+
+                    # 提取坐标 box: [x1, y1, x2, y2]
+                    box = block.get('box', [0, 0, 0, 0])
+
+                    # 合并文本内容
+                    lines = block.get('lines', [])
+                    content = "".join(lines).replace('\n', '').replace(',', '，')  # 替换逗号防止破坏CSV结构
+
+                    # 按照指定的格式写入：
+                    # Page001,Line001,822,1200,[621, 83, 697, 191],内容
+                    output_line = f"Page{page_num_str},Line{line_num_str},{img_w},{img_h},{box},{content}\n"
+                    f_out.write(output_line)
+
+        print(f"结构化脚本已更新: {script_path}")
+
     except Exception as e:
-        print(f"脚本生成失败: {e}")
+        print(f"生成脚本失败: {e}")
 
 
 # --- 4. 业务逻辑控制 ---
@@ -154,10 +180,10 @@ def process_preload_request(base_url, auth_user, auth_pass, manga_id, start_chap
 # --- 模拟调用示例 ---
 if __name__ == "__main__":
     process_preload_request(
-        base_url="http://192.168.137.1:4567/api/v1",
+        base_url="http://10.0.0.2:2333/api/v1",
         auth_user="guest",
         auth_pass="123",
-        manga_id=49,
+        manga_id=3557,
         start_chapter=12,
-        start_page=1
+        start_page=10
     )
