@@ -361,6 +361,6 @@ if __name__ == "__main__":
     except Exception :
         local_ip = "127.0.0.1" # 如果获取失败，则默认为本地回环地址
 
-    port = 12233
+    port = 12235
     print(f"🆗 OCR服务器已启动，访问地址 -->  http://{local_ip}:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
