@@ -89,18 +89,26 @@ def run_mokuro_on_dir(target_dir):
     subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', env=os.environ.copy())
 
 
-def generate_script_file(target_dir, manga_id, chapter_idx):
+def generate_script_file(target_dir, manga_name, manga_id, chapter_idx):
     """
-    解析 .mokuro 生成结构化脚本
-    格式: PageXXX,LineXXX,Width,Height,[box],Content
+    解析 .mokuro 生成全维度结构化脚本
+    格式: manga_name,manga_id,chapter_idx,PageXXX,LineXXX,Width,Height,[box],Content
     """
     target_path = Path(target_dir)
-    # 查找 .mokuro 文件
-    mokuro_file = next(target_path.parent.glob(f"{target_path.name}.mokuro"), None) or \
-                  next(target_path.glob("*.mokuro"), None)
+    # 自动定位 .mokuro 文件
+    mokuro_filename = target_path.name + ".mokuro"
+    mokuro_file = target_path.parent / mokuro_filename
 
-    if not mokuro_file:
-        return
+    if not mokuro_file.exists():
+        mokuro_file = target_path / mokuro_filename
+
+    if not mokuro_file.exists():
+        candidates = list(target_path.parent.glob("*.mokuro")) + list(target_path.glob("*.mokuro"))
+        if candidates:
+            mokuro_file = candidates[0]
+        else:
+            print(f"找不到 OCR 数据，跳过脚本生成。")
+            return
 
     try:
         with open(mokuro_file, 'r', encoding='utf-8') as f:
@@ -109,34 +117,34 @@ def generate_script_file(target_dir, manga_id, chapter_idx):
         script_path = target_path / "script.txt"
 
         with open(script_path, 'w', encoding='utf-8') as f_out:
-            # 按照文件名排序页面
+            # 按文件名排序页面
             pages = sorted(data.get('pages', []), key=lambda x: x.get('img_path', ''))
 
             for p_idx, page in enumerate(pages):
-                # 提取页面元数据
                 img_w = page.get('img_width', 0)
                 img_h = page.get('img_height', 0)
-                # 获取格式化的页码，如 001
                 page_num_str = f"{p_idx + 1:03d}"
 
                 blocks = page.get('blocks', [])
                 for b_idx, block in enumerate(blocks):
-                    # 获取格式化的行号，如 001
                     line_num_str = f"{b_idx + 1:03d}"
-
-                    # 提取坐标 box: [x1, y1, x2, y2]
                     box = block.get('box', [0, 0, 0, 0])
 
-                    # 合并文本内容
-                    lines = block.get('lines', [])
-                    content = "".join(lines).replace('\n', '').replace(',', '，')  # 替换逗号防止破坏CSV结构
+                    # 合并文本并清洗掉破坏 CSV 结构的字符
+                    content = "".join(block.get('lines', [])).replace('\n', '').replace(',', '，')
 
-                    # 按照指定的格式写入：
-                    # Page001,Line001,822,1200,[621, 83, 697, 191],内容
-                    output_line = f"Page{page_num_str},Line{line_num_str},{img_w},{img_h},{box},{content}\n"
+                    # 组合成全维度数据行
+                    # 建议对 manga_name 也做一次逗号替换，防止名字里带逗号
+                    safe_manga_name = str(manga_name).replace(',', '，')
+
+                    output_line = (
+                        f"{safe_manga_name},{manga_id},{chapter_idx},"
+                        f"Page{page_num_str},Line{line_num_str},"
+                        f"{img_w},{img_h},{box},{content}\n"
+                    )
                     f_out.write(output_line)
 
-        print(f"结构化脚本已更新: {script_path}")
+        print(f"结构化脚本(含元数据)已更新: {script_path}")
 
     except Exception as e:
         print(f"生成脚本失败: {e}")
@@ -144,18 +152,21 @@ def generate_script_file(target_dir, manga_id, chapter_idx):
 
 # --- 4. 业务逻辑控制 ---
 
-def process_preload_request(base_url, auth_user, auth_pass, manga_id, start_chapter, start_page, preload_count=10):
+# --- 修改后的 process_preload_request 函数定义 ---
+def process_preload_request(base_url, auth_user, auth_pass, manga_name, manga_id, start_chapter, start_page,
+                            preload_count=10):
     """
     处理预读请求的主入口
+    :param manga_name: 传入漫画名称，用于写入 script.txt 的每一行记录
     """
-    print(f"预读启动: Manga {manga_id} | Auth: {auth_user}")
+    print(f"预读启动: {manga_name} (ID: {manga_id}) | Auth: {auth_user}")
 
     current_chap = int(start_chapter)
     current_page = int(start_page)
     pages_left = preload_count
     affected_chapters = set()
 
-    # 阶段一：流式下载
+    # --- 阶段一：流式下载 (保持之前的逻辑) ---
     while pages_left > 0:
         status = download_single_page(base_url, auth_user, auth_pass, manga_id, current_chap, current_page)
 
@@ -170,20 +181,28 @@ def process_preload_request(base_url, auth_user, auth_pass, manga_id, start_chap
         else:
             break
 
-    # 阶段二：批量 OCR 和 剧本转化
+    # --- 阶段二：批量 OCR 和 剧本转化 (此处必须修改) ---
     for chap_idx in affected_chapters:
         chap_dir = STORAGE_ROOT / str(manga_id) / str(chap_idx)
+
+        # 1. 运行 OCR
         run_mokuro_on_dir(chap_dir)
-        generate_script_file(chap_dir, manga_id, chap_idx)
+
+        # 2. 生成结构化剧本，传入新增的 manga_name
+        # 注意：这里的参数顺序必须与 generate_script_file 定义的一致
+        generate_script_file(chap_dir, manga_name, manga_id, chap_idx)
+
+    print(f"[{manga_name}] 的预读任务完成。")
 
 
 # --- 模拟调用示例 ---
 if __name__ == "__main__":
     process_preload_request(
-        base_url="http://10.0.0.2:2333/api/v1",
+        base_url="http://192.168.137.1:4567/api/v1",
         auth_user="guest",
         auth_pass="123",
-        manga_id=3557,
+        manga_name="ruri",
+        manga_id=49,
         start_chapter=12,
         start_page=10
     )
