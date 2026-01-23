@@ -35,13 +35,13 @@ def get_real_model_path(hf_home_dir):
 
 # --- 3. 核心功能函数 ---
 
-def download_single_page(base_url, auth_user, auth_pass, manga_id, chapter_idx, page_idx):
+def download_single_page(base_url, auth_user, auth_pass, manga_name, manga_id, chapter_idx, page_idx):
     """
     尝试下载单张图片
     :param auth_user: 传入用户名
     :param auth_pass: 传入密码
     """
-    path = STORAGE_ROOT / str(manga_id) / str(chapter_idx)
+    path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chapter_idx)
     path.mkdir(parents=True, exist_ok=True)
 
     file_path = path / f"{page_idx:03d}.jpg"
@@ -168,7 +168,7 @@ def process_preload_request(base_url, auth_user, auth_pass, manga_name, manga_id
 
     # --- 阶段一：流式下载 (保持之前的逻辑) ---
     while pages_left > 0:
-        status = download_single_page(base_url, auth_user, auth_pass, manga_id, current_chap, current_page)
+        status = download_single_page(base_url, auth_user, auth_pass, manga_name, manga_id, current_chap, current_page)
 
         if status == 0:
             affected_chapters.add(current_chap)
@@ -183,7 +183,7 @@ def process_preload_request(base_url, auth_user, auth_pass, manga_name, manga_id
 
     # --- 阶段二：批量 OCR 和 剧本转化 (此处必须修改) ---
     for chap_idx in affected_chapters:
-        chap_dir = STORAGE_ROOT / str(manga_id) / str(chap_idx)
+        chap_dir = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chap_idx)
 
         # 1. 运行 OCR
         run_mokuro_on_dir(chap_dir)
@@ -201,7 +201,7 @@ if __name__ == "__main__":
         base_url="http://192.168.137.1:4567/api/v1",
         auth_user="guest",
         auth_pass="123",
-        manga_name="ruri",
+        manga_name="ruri_dragon",
         manga_id=49,
         start_chapter=12,
         start_page=10
