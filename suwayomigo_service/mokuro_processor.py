@@ -150,10 +150,88 @@ def generate_script_file(target_dir, manga_name, manga_id, chapter_idx):
         print(f"生成脚本失败: {e}")
 
 
+def translate_full_chapter_to_json(ai_client, your_model, manga_name, chapter_idx, script_lines):
+    """
+    接收外部传入的 ai_client 进行批量翻译
+    """
+    if not ai_client:
+        print("跳过翻译：AI 客户端未初始化")
+        return []
+
+    if not script_lines:
+        return []
+
+    # 准备待翻译的纯文本列表，带上索引以便 AI 对应
+    # 格式：{"id": "Page001_Line001", "text": "原文"}
+    translate_payload = []
+    for line in script_lines:
+        parts = line.strip().split(',', 8)
+        if len(parts) < 9: continue
+        translate_payload.append({
+            "id": f"{parts[3]}_{parts[4]}",
+            "text": parts[8]
+        })
+
+    # 构建 Prompt
+    system_content = (
+        f"你是一位精通多门语言的日本漫画翻译专家，正在翻译《{manga_name}》第{chapter_idx}话。\n"
+        "我会给你一个包含多个 ID 和文本的 JSON 列表。请你完成以下任务：\n"
+        "1. 校对并修正 OCR 识别错误。\n"
+        "2. 结合前后文，将文本翻译成地道、流畅的中文。\n"
+        "3. **强制返回 JSON 数组格式**，数组中的每个对象必须包含原有的 'id' 和翻译后的 'trans' 字段。\n"
+        "注意：不要返回任何解释文字，只返回 JSON 代码块。"
+    )
+
+    try:
+        response = ai_client.chat.completions.create(
+            model=your_model,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": json.dumps(translate_payload, ensure_ascii=False)}
+            ],
+            stream=False,
+            timeout=60.0,
+            response_format={"type": "json_object"},
+            temperature=0.3
+        )
+
+        raw_res = response.choices[0].message.content.strip()
+
+        # 移除 Markdown 代码块包裹
+        if raw_res.startswith("```"):
+            raw_res = raw_res.split("\n", 1)[-1].rsplit("\n", 1)[0].strip()
+        if raw_res.startswith("json"):  # 处理 ```json 这种开头
+            raw_res = raw_res[4:].strip()
+
+        res_data = json.loads(raw_res)
+
+        # --- 健壮的解析逻辑 ---
+        if isinstance(res_data, list):
+            return res_data
+        if isinstance(res_data, dict):
+            # 优先找 translations 键，找不到就看字典里有没有唯一的 list
+            if "translations" in res_data:
+                return res_data["translations"]
+            # 自动寻找字典中任何是列表类型的字段
+            for val in res_data.values():
+                if isinstance(val, list):
+                    return val
+
+        print(f"⚠️ AI 返回了非预期格式: {raw_res}")
+        return []
+
+    except Exception as e:
+        print(f"全话批量翻译失败: {e}")
+        # 这里建议打印出 raw_res，看看 AI 到底吐了什么脏数据
+        if 'raw_res' in locals():
+            print(f"AI 原始输出内容: {raw_res}")
+        return []
+
+
 # --- 4. 业务逻辑控制 ---
 
 # --- 修改后的 process_preload_request 函数定义 ---
-def process_preload_request(base_url, auth_user, auth_pass, manga_name, manga_id, start_chapter, start_page,
+def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_model, manga_name, manga_id, start_chapter, start_page,
                             preload_count=10):
     """
     处理预读请求的主入口
@@ -192,15 +270,44 @@ def process_preload_request(base_url, auth_user, auth_pass, manga_name, manga_id
         # 注意：这里的参数顺序必须与 generate_script_file 定义的一致
         generate_script_file(chap_dir, manga_name, manga_id, chap_idx)
 
+        # 2. 读取刚生成的脚本
+        script_file = chap_dir / "script.txt"
+        with open(script_file, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+
+        # 3. 启动全话 AI 翻译 (JSON 模式)
+        if ai_client:
+            print(f"--- 正在通过 AI JSON 模式翻译全话: {manga_name} 第 {chap_idx} 话 ---")
+            json_translations = translate_full_chapter_to_json(ai_client, your_model, manga_name, chap_idx, original_lines)
+
+        # 4. 建立索引并存入数据库
+        # 将 JSON 结果转化为字典方便匹配: { "Page001_Line001": "译文" }
+        trans_map = {item['id']: item['trans'] for item in json_translations}
+
+        # 同步到数据库
+        # save_batch_to_db_v2(manga_id, chap_idx, original_lines, trans_map)
+
     print(f"[{manga_name}] 的预读任务完成。")
 
 
 # --- 模拟调用示例 ---
 if __name__ == "__main__":
+    try:
+        from openai import OpenAI
+        from dotenv import load_dotenv
+        load_dotenv()  # 加载 .env 文件里的 API_KEY 等
+    except ImportError:
+        print("请确保已安装 openai 和 python-dotenv 库")
+    api_key = os.getenv("API_KEY")
+    base_url = os.getenv("BASE_URL")
+    your_model = os.getenv("YOUR_MODEL")
+
     process_preload_request(
         base_url="http://192.168.137.1:4567/api/v1",
         auth_user="guest",
         auth_pass="123",
+        ai_client=OpenAI(api_key=api_key, base_url=base_url),
+        your_model=your_model,
         manga_name="ruri_dragon",
         manga_id=49,
         start_chapter=12,

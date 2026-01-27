@@ -81,11 +81,11 @@ your_model = os.getenv("YOUR_MODEL")
 ocr_secret_key = os.getenv("OCR_SECRET_KEY")
 # --- 核心修改：增加 AI 可用性检测 ---
 is_ai_available = False
-client = None
+ai_client = None
 
 if api_key and base_url:
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        ai_client = OpenAI(api_key=api_key, base_url=base_url)
         # 这里不进行实际请求，只检查配置是否存在
         is_ai_available = True
         print("✅ AI 配置加载成功")
@@ -185,7 +185,7 @@ def get_ai_translation(text: str, manga_name: str):
         return ""
 
     # 1. 优先尝试 AI 翻译
-    if is_ai_available and client:
+    if is_ai_available and ai_client:
         try:
             start_time = time.time()
             # 使用极简 Prompt：不要求解释，只要求地道翻译和核心词原型
@@ -201,7 +201,7 @@ def get_ai_translation(text: str, manga_name: str):
                 "请翻译成地道、流畅的中文。直接返回译文。"
             )
 
-            response = client.chat.completions.create(
+            response = ai_client.chat.completions.create(
                 model=your_model,
                 messages=[
                     {"role": "system", "content": system_content},
