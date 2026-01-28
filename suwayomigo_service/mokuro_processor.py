@@ -232,7 +232,7 @@ def translate_full_chapter_to_json(ai_client, your_model, manga_name, chapter_id
 
 # --- 修改后的 process_preload_request 函数定义 ---
 def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_model, manga_name, manga_id, start_chapter, start_page,
-                            preload_count=10):
+                            preload_count=100):
     """
     处理预读请求的主入口
     :param manga_name: 传入漫画名称，用于写入 script.txt 的每一行记录
@@ -255,7 +255,7 @@ def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_mode
         elif status == 1:
             current_chap += 1
             current_page = 0
-            if current_chap > int(start_chapter) + 5: break
+            if current_chap > int(start_chapter) + 3: break
         else:
             break
 
@@ -311,5 +311,5 @@ if __name__ == "__main__":
         manga_name="ruri_dragon",
         manga_id=49,
         start_chapter=12,
-        start_page=10
+        start_page=0
     )
