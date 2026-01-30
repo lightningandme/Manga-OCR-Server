@@ -4,6 +4,7 @@ import sqlite3
 import json
 import requests
 import subprocess
+import time
 from pathlib import Path
 from requests.auth import HTTPBasicAuth
 
@@ -123,8 +124,10 @@ def download_single_page(base_url, auth_user, auth_pass, manga_name, manga_id, c
     path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chapter_idx)
     path.mkdir(parents=True, exist_ok=True)
 
+    # --- 修改点：如果剧本已存在，返回特殊状态码 3 ---
     if (path / "script.txt").exists():
-        return 0
+        # 这里不要打印，否则会刷屏
+        return 3
 
     file_path = path / f"{page_idx:03d}.jpg"
 
@@ -253,7 +256,7 @@ def generate_script_file(target_dir, manga_name, manga_id, chapter_idx):
 
 def translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, chapter_idx, script_lines):
     """
-    接收外部传入的 ai_client 进行批量翻译
+    接收外部传入的 ai_client 进行批量翻译（支持分批处理以避免 Token 超限）
     """
     if not ai_client:
         print("跳过翻译：AI 客户端未初始化")
@@ -262,18 +265,27 @@ def translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, 
     if not script_lines:
         return []
 
-    # 准备待翻译的纯文本列表，带上索引以便 AI 对应
-    # 格式：{"id": "Page001_Line001", "text": "原文"}
+    # 1. 准备待翻译的纯文本列表
     translate_payload = []
     for line in script_lines:
         parts = line.strip().split(',', 8)
         if len(parts) < 9: continue
         translate_payload.append({
-            "id": f"{parts[3]}_{parts[4]}",
+            "id": f"{parts[3]}_{parts[4]}",  # PageXXX_LineXXX
             "text": parts[8]
         })
 
-    # 构建 Prompt
+    if not translate_payload:
+        return []
+
+    # --- 核心修改：分批处理逻辑 ---
+    BATCH_SIZE = 40  # 每批处理 40 行，防止 AI 输出截断
+    final_list = []
+    total_items = len(translate_payload)
+
+    print(f"--- 开始翻译: {manga_name} 第 {chapter_idx} 话 (共 {total_items} 行) ---")
+
+    # 构建基础 Prompt (保持不变)
     system_content = (
         f"你是一位精通多门语言的日本漫画翻译专家，正在翻译《{manga_name}》第{chapter_idx}话。\n"
         "我会给你一个包含多个 ID 和文本的 JSON 列表。请你完成以下任务：\n"
@@ -283,88 +295,101 @@ def translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, 
         "注意：不要返回任何解释文字，只返回 JSON 代码块。"
     )
 
+    # 循环切片
+    for i in range(0, total_items, BATCH_SIZE):
+        batch = translate_payload[i: i + BATCH_SIZE]
+        print(
+            f"  > 正在处理批次 {i // BATCH_SIZE + 1}/{(total_items + BATCH_SIZE - 1) // BATCH_SIZE} (行 {i + 1}~{min(i + BATCH_SIZE, total_items)})...")
+
+        # 重试机制：每个批次最多重试 3 次
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = ai_client.chat.completions.create(
+                    model=your_model,
+                    messages=[
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}
+                    ],
+                    stream=False,
+                    timeout=90.0,  # 稍微增加超时时间
+                    response_format={"type": "json_object"},
+                    temperature=0.3
+                )
+
+                raw_res = response.choices[0].message.content.strip()
+
+                # 清洗 Markdown 标记
+                if raw_res.startswith("```"):
+                    raw_res = raw_res.split("\n", 1)[-1].rsplit("\n", 1)[0].strip()
+                if raw_res.startswith("json"):
+                    raw_res = raw_res[4:].strip()
+
+                batch_res_data = json.loads(raw_res)
+
+                # 解析当次批次的结果
+                batch_final = []
+                if isinstance(batch_res_data, list):
+                    batch_final = batch_res_data
+                elif isinstance(batch_res_data, dict):
+                    if "translations" in batch_res_data:
+                        batch_final = batch_res_data["translations"]
+                    else:
+                        for val in batch_res_data.values():
+                            if isinstance(val, list):
+                                batch_final = val
+                                break
+
+                if batch_final:
+                    final_list.extend(batch_final)  # 合并结果
+                    break  # 成功则跳出重试循环
+                else:
+                    raise ValueError("解析后未找到列表数据")
+
+            except Exception as e:
+                print(f"    [警告] 批次处理失败 (第 {attempt + 1} 次重试): {e}")
+                if attempt == max_retries - 1:
+                    print("    [错误] 该批次翻译最终失败，跳过。")
+                time.sleep(2)  # 失败后稍作等待
+
+    # --- 后处理逻辑 (写入文件和数据库) ---
+    if not final_list:
+        print("⚠️ 未获取到任何翻译结果")
+        return []
+
+    print(f"全话翻译完成，共获取 {len(final_list)} 条译文")
+
+    # 获取目录路径
+    path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chapter_idx)
+    script_zh_path = path / "script_zh.txt"
+
+    # 生成 script_zh.txt 并写入 DB
+    trans_map = {item['id']: item.get('trans', '') for item in final_list}
+
     try:
-        response = ai_client.chat.completions.create(
-            model=your_model,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": json.dumps(translate_payload, ensure_ascii=False)}
-            ],
-            stream=False,
-            timeout=60.0,
-            response_format={"type": "json_object"},
-            temperature=0.3
-        )
+        with open(script_zh_path, 'w', encoding='utf-8') as f_zh:
+            for line in script_lines:
+                parts = line.strip().split(',', 8)
+                if len(parts) < 9:
+                    continue
 
-        raw_res = response.choices[0].message.content.strip()
+                # 构造 ID 匹配
+                line_id = f"{parts[3]}_{parts[4]}"  # PageXXX_LineXXX
+                trans_text = trans_map.get(line_id, "")
 
-        # 移除 Markdown 代码块包裹
-        if raw_res.startswith("```"):
-            raw_res = raw_res.split("\n", 1)[-1].rsplit("\n", 1)[0].strip()
-        if raw_res.startswith("json"):  # 处理 ```json 这种开头
-            raw_res = raw_res[4:].strip()
+                # 替换最后一部分 Content 为译文 (保持 CSV 格式)
+                new_parts = parts[:-1] + [trans_text]
+                f_zh.write(",".join(str(p) for p in new_parts) + "\n")
 
-        res_data = json.loads(raw_res)
+        print(f"已生成译文脚本: {script_zh_path}")
 
-        # --- 健壮的解析逻辑 ---
-        # --- 健壮的解析逻辑 ---
-        final_list = []
-        if isinstance(res_data, list):
-            final_list = res_data
-        elif isinstance(res_data, dict):
-            # 优先找 translations 键，找不到就看字典里有没有唯一的 list
-            if "translations" in res_data:
-                final_list = res_data["translations"]
-            else:
-                # 自动寻找字典中任何是列表类型的字段
-                for val in res_data.values():
-                    if isinstance(val, list):
-                        final_list = val
-                        break
-        
-        if not final_list:
-            print(f"⚠️ AI 返回了非预期格式: {raw_res}")
-            return []
-
-        # 获取目录路径
-        path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chapter_idx)
-        script_zh_path = path / "script_zh.txt"
-        
-        # 生成 script_zh.txt 并写入 DB
-        trans_map = {item['id']: item.get('trans', '') for item in final_list}
-        
-        try:
-            with open(script_zh_path, 'w', encoding='utf-8') as f_zh:
-                for line in script_lines:
-                    parts = line.strip().split(',', 8)
-                    if len(parts) < 9: 
-                        continue
-                    
-                    # 构造 ID 匹配
-                    line_id = f"{parts[3]}_{parts[4]}" # PageXXX_LineXXX
-                    trans_text = trans_map.get(line_id, "")
-                    
-                    # 替换最后一部分 Content 为译文 (保持 CSV 格式)
-                    # 格式: manga_name,manga_id,chapter_idx,PageXXX,LineXXX,Width,Height,[box],TransContent
-                    new_parts = parts[:-1] + [trans_text]
-                    f_zh.write(",".join(str(p) for p in new_parts) + "\n")
-            
-            print(f"已生成译文脚本: {script_zh_path}")
-            
-            # 更新数据库
-            update_translation_in_db(manga_id, chapter_idx, trans_map)
-            
-        except Exception as e:
-            print(f"写入译文脚本或数据库失败: {e}")
-
-        return final_list
+        # 更新数据库
+        update_translation_in_db(manga_id, chapter_idx, trans_map)
 
     except Exception as e:
-        print(f"全话批量翻译失败: {e}")
-        # 这里建议打印出 raw_res，看看 AI 到底吐了什么脏数据
-        if 'raw_res' in locals():
-            print(f"AI 原始输出内容: {raw_res}")
-        return []
+        print(f"写入译文脚本或数据库失败: {e}")
+
+    return final_list
 
 
 # --- 4. 业务逻辑控制 ---
@@ -383,29 +408,41 @@ def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_mode
     pages_left = preload_count
     affected_chapters = set()
 
-    # --- 阶段一：流式下载 (保持之前的逻辑) ---
-    # --- 阶段一：流式下载 (改进版逻辑) ---
-    while True:
-        # 退出条件检查：如果 page 已经读完 (pages_left <= 0)，且章节已经前进了 2 章以上
-        if pages_left <= 0 and (current_chap >= int(start_chapter) + 2):
+    # --- 阶段一：流式下载 (修复版逻辑) ---
+    while pages_left > 0:
+        # 安全熔断：防止无限向后查找章节 (例如找了 10 话都是空的)
+        if current_chap > int(start_chapter) + 10:
+            print("已连续检测 10 个章节无内容，停止预读。")
             break
-            
+
         status = download_single_page(base_url, auth_user, auth_pass, manga_name, manga_id, current_chap, current_page)
 
         if status == 0:
+            # 下载成功或图片已存在
             affected_chapters.add(current_chap)
             current_page += 1
-            if pages_left > 0:
-                pages_left -= 1
+            pages_left -= 1
+
         elif status == 1:
-            # 404 Not Found -> 这一话可能结束了，去下一话
+            # 404 本话结束，去下一话
+            print(f"章节 {current_chap} 结束，进入下一话...")
             current_chap += 1
             current_page = 0
-            # 安全熔断：如果超过起始章节太多(比如10话)都找不到，还是得停，防止无限试错
-            if current_chap > int(start_chapter) + 10: 
-                break
+
+        elif status == 3:
+            # --- 新增逻辑：发现 script.txt 已存在 ---
+            # 既然剧本有了，说明这一话已经处理过了。
+            # 我们将它加入 affected_chapters (以便检查是否需要更新翻译)，然后直接跳到下一话
+            # 避免在这里傻傻地从第0页遍历到第100页
+            print(f"章节 {current_chap} 本地缓存完整，跳过下载，检查下一话。")
+            current_chap += 1
+            current_page = 0
+            # 这里不扣减 pages_left，因为我们并没有真正消耗预读额度，或者你可以选择扣减
+            # 如果你想“只要缓存了就算完成任务”，可以 break
+
         else:
             # 其他错误 (status=2)
+            print("遇到下载错误，停止预读。")
             break
 
     # --- 阶段二：批量 OCR 和 剧本转化 (此处必须修改) ---
