@@ -359,32 +359,54 @@ def translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, 
 
     print(f"全话翻译完成，共获取 {len(final_list)} 条译文")
 
-    # 获取目录路径
     path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chapter_idx)
     script_zh_path = path / "script_zh.txt"
-
-    # 生成 script_zh.txt 并写入 DB
     trans_map = {item['id']: item.get('trans', '') for item in final_list}
 
     try:
         with open(script_zh_path, 'w', encoding='utf-8') as f_zh:
             for line in script_lines:
-                parts = line.strip().split(',', 8)
-                if len(parts) < 9:
-                    continue
+                line = line.strip()
+                if not line: continue
 
-                # 构造 ID 匹配
-                line_id = f"{parts[3]}_{parts[4]}"  # PageXXX_LineXXX
+                # 1. 依然使用 rsplit 精准切分出 [元数据] 和 [原文]
+                parts_fixed = line.rsplit(',', 1)
+                if len(parts_fixed) < 2: continue
+
+                meta_part = parts_fixed[0]
+                original_text = parts_fixed[1]
+
+                # 2. 仅为了获取 ID (PageXXX_LineXXX) 进行 split
+                # 我们只需要前 5 个字段，后面的坐标部分我们不碰它
+                temp_elements = meta_part.split(',')
+                if len(temp_elements) < 5: continue
+                line_id = f"{temp_elements[3]}_{temp_elements[4]}"
+
+                # 3. 获取译文
                 trans_text = trans_map.get(line_id, "")
 
-                # 替换最后一部分 Content 为译文 (保持 CSV 格式)
-                new_parts = parts[:-1] + [trans_text]
-                f_zh.write(",".join(str(p) for p in new_parts) + "\n")
+                # 4. 写入文件：直接拼接 meta_part，不重新组合 box，确保 100% 还原
+                f_zh.write(f"{meta_part},{trans_text}\n")
 
-        print(f"已生成译文脚本: {script_zh_path}")
+                # 5. 同步数据库 (修复 box 提取逻辑)
+                # 找到第一个 "[" 和最后一个 "]" 的位置来提取完整的 box
+                start_box = meta_part.find('[')
+                end_box = meta_part.rfind(']')
+                box_str = meta_part[start_box:end_box + 1] if start_box != -1 else ""
 
-        # 更新数据库
+                db_entry = {
+                    'page_idx': temp_elements[3],
+                    'line_idx': temp_elements[4],
+                    'img_width': int(temp_elements[5]),
+                    'img_height': int(temp_elements[6]),
+                    'box': box_str,
+                    'content': original_text
+                }
+                save_script_to_db(manga_name, manga_id, chapter_idx, [db_entry])
+
+        # 批量更新翻译
         update_translation_in_db(manga_id, chapter_idx, trans_map)
+        print(f"已同步更新译文脚本及数据库: {script_zh_path}")
 
     except Exception as e:
         print(f"写入译文脚本或数据库失败: {e}")
@@ -407,6 +429,7 @@ def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_mode
     current_page = int(start_page)
     pages_left = preload_count
     affected_chapters = set()
+    translate_only_chapters = set()  # 新增：专门存放只需补翻译的章节
 
     # --- 阶段一：流式下载 (修复版逻辑) ---
     while pages_left > 0:
@@ -430,45 +453,45 @@ def process_preload_request(base_url, auth_user, auth_pass, ai_client, your_mode
             current_page = 0
 
         elif status == 3:
-            # --- 新增逻辑：发现 script.txt 已存在 ---
-            # 既然剧本有了，说明这一话已经处理过了。
-            # 我们将它加入 affected_chapters (以便检查是否需要更新翻译)，然后直接跳到下一话
-            # 避免在这里傻傻地从第0页遍历到第100页
-            print(f"章节 {current_chap} 本地缓存完整，跳过下载，检查下一话。")
+            # 发现 script.txt 已存在
+            path = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(current_chap)
+            # 判断是否缺失 script_zh.txt
+            if not (path / "script_zh.txt").exists():
+                print(f"章节 {current_chap} 存在脚本但缺失翻译，加入补翻队列。")
+                translate_only_chapters.add(current_chap)
+            else:
+                print(f"章节 {current_chap} 已完成(含翻译)，跳过。")
+
             current_chap += 1
             current_page = 0
-            # 这里不扣减 pages_left，因为我们并没有真正消耗预读额度，或者你可以选择扣减
-            # 如果你想“只要缓存了就算完成任务”，可以 break
 
         else:
             # 其他错误 (status=2)
             print("遇到下载错误，停止预读。")
             break
 
-    # --- 阶段二：批量 OCR 和 剧本转化 (此处必须修改) ---
+    # --- 阶段二：批量 OCR 和 剧本转化  ---
+    all_to_translate = affected_chapters | translate_only_chapters
+
+    # 1. 先对新下载的章节跑 OCR
     for chap_idx in affected_chapters:
         chap_dir = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chap_idx)
-
-        # 1. 运行 OCR
         run_mokuro_on_dir(chap_dir)
-
-        # 2. 生成结构化剧本，传入新增的 manga_name
-        # 注意：这里的参数顺序必须与 generate_script_file 定义的一致
         generate_script_file(chap_dir, manga_name, manga_id, chap_idx)
 
-        # 2. 读取刚生成的脚本
-        script_file = chap_dir / "script.txt"
-        with open(script_file, 'r', encoding='utf-8') as f:
-            original_lines = f.readlines()
+    # 2. 对所有需要翻译的章节跑 AI 翻译
+    if ai_client:
+        for chap_idx in all_to_translate:
+            chap_dir = STORAGE_ROOT / str(manga_name) / str(manga_id) / str(chap_idx)
+            script_file = chap_dir / "script.txt"
 
-        # 3. 启动全话 AI 翻译 (JSON 模式)
-        # 3. 启动全话 AI 翻译 (JSON 模式)
-        if ai_client:
-            print(f"--- 正在通过 AI JSON 模式翻译全话: {manga_name} 第 {chap_idx} 话 ---")
-            # 注意: 这里 update 了参数，传入 manga_id
-            translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, chap_idx, original_lines)
+            # 双重保险：确保 script.txt 真的存在
+            if script_file.exists():
+                with open(script_file, 'r', encoding='utf-8') as f:
+                    original_lines = f.readlines()
 
-        # (原有的 save_batch_to_db_v2 调用已移除，逻辑已整合进 translate 函数)
+                print(f"--- 正在通过 AI JSON 模式翻译全话: {manga_name} 第 {chap_idx} 话 ---")
+                translate_full_chapter_to_json(ai_client, your_model, manga_name, manga_id, chap_idx, original_lines)
 
     print(f"[{manga_name}] 的预读任务完成。")
 
