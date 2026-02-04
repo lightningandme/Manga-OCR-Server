@@ -7,9 +7,19 @@ import uvicorn
 from PIL import Image
 from fastapi import FastAPI, Body, Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
-from dotenv import load_dotenv
 import socket
 from pathlib import Path
+from dotenv import load_dotenv
+import threading
+import sqlite3
+import json
+from pydantic import BaseModel
+import mokuro_processor
+
+# --- 全局任务锁 ---
+# 用于记录当前正在进行的预读任务，防止重复提交
+# 格式: set("mangaId_chapterIdx")
+PRELOAD_TASKS_LOCK = set()
 
 # 1. 路径自适应初始化
 # 无论是在本地运行还是整合包运行，__file__ 总是指向 server.py 本身
@@ -18,6 +28,8 @@ current_file_path = Path(__file__).resolve()
 current_dir = current_file_path.parent
 # root_dir 是项目的根目录 (在整合包里是包含 python.exe 的目录)
 root_dir = current_dir.parent
+# 数据库路径 (确保和 mokuro_processor 使用同一个 DB)
+DB_PATH = current_file_path.parent / "manga_script.db"
 
 # 将相关路径加入 sys.path，确保模块导入不会报错
 for p in [current_dir, root_dir]:
@@ -30,8 +42,6 @@ os.environ["HF_HOME"] = str(root_dir / "huggingface")
 easyocr_path = str(root_dir / "easyocr_models")
 
 # 3. 智能加载 .env 配置文件
-from dotenv import load_dotenv
-
 # 定义可能的 .env 搜索路径（优先级：本地文件夹 > 根目录）
 env_candidates = [
     current_dir / ".env",  # 本地开发环境：.env 在源码文件夹里
@@ -72,8 +82,6 @@ if device == "cuda":
 else:
     print("提示: 未检测到 NVIDIA GPU 或 CUDA 驱动，将使用 CPU 运行（速度较慢）。")
 
-
-
 # 从环境变量中读取
 api_key = os.getenv("API_KEY")
 base_url = os.getenv("BASE_URL")
@@ -95,6 +103,19 @@ else:
     print("ℹ️ 未检测到 API_KEY，已自动进入网络翻译模式（如果想体验更好的AI翻译，请根据.env.example进行配置）")
 
 app = FastAPI()
+
+# --- 定义手机端 /preload 接口的请求参数结构 ---
+class PreloadRequest(BaseModel):
+    base_url: str
+    auth_user: str
+    auth_pass: str
+    manga_name: str
+    manga_id: int
+    start_chapter: int
+    start_page: int
+    preload_count: int = 100
+    min_chapters: int = 2
+    max_chapters: int = 5
 
 # 初始化检测器 (只开启检测功能，不开启识别，速度极快)
 print("初始化 easyocr 文本检测器...")
@@ -350,6 +371,127 @@ async def get_translation(token: str = Depends(verify_api_key)):
     print(f"[译文] -->  {translation}")
     return {"translation": translation}
 
+
+# --- 核心接口 1: 异步启动预读任务 ---
+@app.post("/api/v1/preload")
+def trigger_preload(req: PreloadRequest, token: str = Depends(verify_api_key)):
+    """
+    接收手机端的预读请求，在后台开启线程下载并翻译
+    """
+    task_id = f"{req.manga_id}_{req.start_chapter}"
+
+    # 1. 检查任务锁：如果任务已经在运行，直接返回
+    if task_id in PRELOAD_TASKS_LOCK:
+        print(f"[API] 任务 {task_id} 正在运行中，忽略重复请求。")
+        return {"status": "ignored", "message": "Task already running"}
+
+    # 2. 定义后台线程要执行的包装函数
+    def background_worker():
+        print(f"[API] 启动后台任务: {task_id}")
+        PRELOAD_TASKS_LOCK.add(task_id)
+        try:
+            # 调用 mokuro_processor.py 里的主函数
+            # 注意：我们需要传入 server.py 里已经初始化好的 ai_client 和 your_model
+            # 假设你在 server.py 里已经初始化了 ai_client (如果没有，需要在这里处理)
+
+            # 临时补救：如果在 server.py 里没有全局 ai_client，这里需要获取
+            # 建议在 server.py 全局范围初始化好 ai_client
+
+            mokuro_processor.process_preload_request(
+                base_url=req.base_url,
+                auth_user=req.auth_user,
+                auth_pass=req.auth_pass,
+                ai_client=ai_client,  # <--- 使用 server.py 全局的 ai_client
+                your_model=your_model,  # <--- 使用 server.py 全局的 model
+                manga_name=req.manga_name,
+                manga_id=req.manga_id,
+                start_chapter=req.start_chapter,
+                start_page=req.start_page,
+                preload_count=req.preload_count,
+                min_chapters=req.min_chapters,
+                max_chapters=req.max_chapters
+            )
+        except Exception as e:
+            print(f"[API] 任务 {task_id} 发生异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            print(f"[API] 任务 {task_id} 结束/释放锁")
+            if task_id in PRELOAD_TASKS_LOCK:
+                PRELOAD_TASKS_LOCK.remove(task_id)
+
+    # 3. 启动线程
+    thread = threading.Thread(target=background_worker, daemon=True)
+    thread.start()
+
+    return {"status": "success", "message": "Background task started", "task_id": task_id}
+
+
+# --- 核心接口 2: 获取整页数据 (含坐标、翻译、分词) ---
+@app.get("/api/v1/get_chapter_data")
+def get_chapter_data(manga_id: int, chapter_idx: int, page_idx: int, token: str = Depends(verify_api_key)):
+    # 格式化 page_idx，确保是 "001" 这种格式（根据你的数据库存法调整）
+    # 假设 mokuro_processor 存的是不带 "Page" 前缀的数字字符串，还是带前缀的？
+    # 查看 mokuro_processor 代码：unique_id = f"{page_id}_{line_idx}"，page_id 是 parts[3]，通常是 '001'
+    # 为了保险，我们让手机端传纯数字，这里转一下
+    page_str = f"{page_idx:03d}"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # 查询指定页的所有数据
+    # 注意：这里假设你的表结构和 mokuro_processor 里定义的一致
+    cursor.execute('''
+        SELECT line_idx, img_width, img_height, box, content, translation 
+        FROM manga_lines 
+        WHERE manga_id=? AND chapter_idx=? AND page_idx=?
+    ''', (manga_id, chapter_idx, page_str))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    items = []
+    page_width = 0
+    page_height = 0
+
+    for row in rows:
+        line_idx, w, h, box_str, content, translation = row
+
+        # 记录图片尺寸（用于手机端坐标换算）
+        page_width = w
+        page_height = h
+
+        # 1. 实时分词 (复用 server.py 里原有的 analyze_text 函数)
+        # 确保 analyze_text 函数在 server.py 里是可用的
+        words_data = []
+        try:
+            words_data = analyze_text(content)
+        except Exception as e:
+            print(f"分词失败: {e}")
+
+        # 2. 解析 Box 字符串 "[x, y, w, h]" -> list
+        try:
+            box_list = json.loads(box_str)
+        except:
+            box_list = [0, 0, 0, 0]
+
+        items.append({
+            "id": f"{page_str}_{line_idx}",
+            "box": box_list,
+            "text": content,
+            "translation": translation if translation else "",
+            "words": words_data
+        })
+
+    return {
+        "status": "success",
+        "manga_id": manga_id,
+        "chapter": chapter_idx,
+        "page": page_idx,
+        "img_width": page_width,
+        "img_height": page_height,
+        "items": items
+    }
 
 if __name__ == "__main__":
     # 获取本机IP地址
