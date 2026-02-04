@@ -505,4 +505,5 @@ if __name__ == "__main__":
 
     port = 12235
     print(f"🆗 OCR服务器已启动，访问地址 -->  http://{local_ip}:{port}")
+    print(f"🔍 开发者API测试访问地址 -->  http://{local_ip}:{port}/docs")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
