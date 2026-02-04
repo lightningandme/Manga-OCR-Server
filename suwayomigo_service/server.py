@@ -432,9 +432,8 @@ def trigger_preload(req: PreloadRequest, token: str = Depends(verify_api_key)):
 def get_chapter_data(manga_id: int, chapter_idx: int, page_idx: int, token: str = Depends(verify_api_key)):
     # 格式化 page_idx，确保是 "001" 这种格式（根据你的数据库存法调整）
     # 假设 mokuro_processor 存的是不带 "Page" 前缀的数字字符串，还是带前缀的？
-    # 查看 mokuro_processor 代码：unique_id = f"{page_id}_{line_idx}"，page_id 是 parts[3]，通常是 '001'
     # 为了保险，我们让手机端传纯数字，这里转一下
-    page_str = f"{page_idx:03d}"
+    page_str = f"Page{page_idx:03d}"
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
