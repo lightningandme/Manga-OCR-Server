@@ -229,6 +229,7 @@ def get_ai_translation(text: str, manga_name: str):
                     {"role": "user", "content": text},
                 ],
                 stream=False,
+                extra_body={"thinking": {"type": "disabled"}},
                 timeout=5.0,
                 temperature=0.3,  # 降低随机性，让翻译更稳定
                 max_tokens=150  # 限制输出长度，减少传输耗时
